@@ -5,6 +5,7 @@ import { payloadOf } from "./queue";
 import { runBuild } from "@/lib/builder/engine";
 import { settle } from "@/lib/billing/entitlements";
 import { emit as emitLearning, processPending } from "@/lib/learning/service";
+import { runCycle as runMaintenanceCycle } from "@/lib/factory/maintenance";
 import { runPlanning } from "@/lib/factory/planning";
 import { runExperiment as runLabExperiment } from "@/lib/lab/lab";
 import { advanceGoal, createGoal, type GoalKind, type GoalMode, type GoalLimits } from "@/lib/runtime/goals";
@@ -68,6 +69,11 @@ export const HANDLERS: Record<string, Handler> = {
   "product.change": async (job) => {
     const { productId, request, actor } = payloadOf<{ productId: string; request: string; actor: string }>(job);
     return runChangeRequest(job.companyId, productId, request, actor);
+  },
+  // One bounded maintenance cycle for a product (mode + budgets enforced in factory/maintenance.ts; checkpointed).
+  "maintenance.cycle": async (job) => {
+    const { productId, actor, cycleId } = payloadOf<{ productId: string; actor: string; cycleId?: string }>(job);
+    return runMaintenanceCycle(job.companyId, productId, actor, { cycleId });
   },
   // Learning: process pending learning events (also run by the worker's maintenance tick).
   "learning.process": async (job) => ({ processed: await processPending(200, [job.companyId]) }),

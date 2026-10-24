@@ -8,6 +8,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { ApiError } from "@/lib/api";
+import { resilientFetch, type ProviderHttpError } from "@/lib/resilience/http";
 import { PLANS, priceEnvFor, type PlanId, type BillingInterval } from "./plans";
 
 const API = () => process.env.STRIPE_API_BASE || "https://api.stripe.com";
@@ -29,13 +30,14 @@ function form(obj: Record<string, string | number | undefined>, prefix = ""): st
 async function stripe<T>(path: string, body: string[] | null, idempotencyKey?: string): Promise<T> {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new ApiError("Billing is not configured on this server (STRIPE_SECRET_KEY)", 503);
-  const r = await fetch(`${API()}${path}`, {
+  // GETs retry on 429/5xx/timeouts; POSTs retry ONLY with an Idempotency-Key (Stripe dedupes those) — never blindly.
+  const r = await resilientFetch(`${API()}${path}`, {
     method: body === null ? "GET" : "POST",
     headers: { Authorization: `Bearer ${key}`, ...(body === null ? {} : { "Content-Type": "application/x-www-form-urlencoded" }), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
     body: body === null ? undefined : body.join("&"),
-    signal: AbortSignal.timeout(20_000),
-  }).catch((e) => {
-    throw new ApiError(`Payment provider unreachable: ${(e as Error).message}`, 502);
+  }, { provider: "stripe", timeoutMs: 20_000, maxAttempts: 3 }).catch((e) => {
+    const k = (e as ProviderHttpError).kind;
+    throw new ApiError(k === "rate_limited" ? "The payment provider is rate-limiting requests; try again shortly" : k === "timeout" ? "The payment provider did not respond in time; nothing was charged twice — try again" : `Payment provider unreachable: ${(e as Error).message}`, k === "rate_limited" ? 429 : 502);
   });
   const json = (await r.json().catch(() => ({}))) as T & { error?: { message?: string } };
   if (!r.ok) throw new ApiError(`Payment provider error: ${json.error?.message ?? r.status}`, r.status >= 500 ? 502 : 400);

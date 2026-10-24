@@ -17,6 +17,7 @@ import { purgeExpiredRevocations } from "@/lib/auth/session";
 import { recoverReservations } from "@/lib/billing/entitlements";
 import { log } from "@/lib/observability/log";
 import { processPending } from "@/lib/learning/service";
+import { resumeCycles } from "@/lib/factory/maintenance";
 
 export async function purgeWorkspaceOutput(companyId: string, retentionDays: number, now = new Date()) {
   const before = new Date(now.getTime() - retentionDays * 86400_000);
@@ -62,6 +63,9 @@ export async function runMaintenance(now = new Date()) {
   out.orphanTreesRemoved = await cleanOrphanTrees();
   // Learning runs in the background: delivery never waits for it, and a failure here only delays insights.
   out.learningEventsProcessed = await processPending(500).catch(() => 0);
+  // Maintenance cycles a crashed worker left RUNNING resume from their checkpoint.
+  const stuck = await prisma.maintenanceCycle.findMany({ where: { status: "RUNNING", createdAt: { lt: new Date(now.getTime() - 60_000) } }, select: { companyId: true }, distinct: ["companyId"] });
+  for (const c of stuck) await resumeCycles(c.companyId).catch(() => null);
   log("info", "maintenance.done", out);
   return out;
 }

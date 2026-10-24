@@ -58,8 +58,8 @@ beforeAll(async () => {
 afterAll(async () => {
   const passed = results.filter((r) => r.passed).length;
   writeFileSync(join(tmpdir(), "aura-learning-eval.json"), JSON.stringify({ suite: LEARNING_SUITE_VERSION, attributionRules: ATTRIBUTION_RULES_VERSION, ranAt: new Date().toISOString(), passed, total: results.length, results }, null, 2));
-  await prisma.company.deleteMany({ where: { id: { in: [wsA, wsB] } } });
-  await prisma.user.deleteMany({ where: { id: owner } });
+  await prisma.company.deleteMany({ where: { id: { in: [wsA, wsB].filter(Boolean) } } });
+  if (owner) await prisma.user.deleteMany({ where: { id: owner } });
 });
 
 describe(`learning evaluation suite ${LEARNING_SUITE_VERSION}`, () => {

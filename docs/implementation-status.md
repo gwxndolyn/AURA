@@ -1,10 +1,31 @@
 # Implementation status ledger
 
 The recovery point for continuing work. Each row says where the code is, what
-was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft, V11 learning).
+was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft, V11 learning, V13 integration, V14 evolution).
 
 Status: **Verified** (tests run and passing) · **Implemented, unverified** ·
 **Partial** · **Blocked** (needs credentials/infrastructure) · **Not implemented**.
+
+## Integration intelligence + product evolution — AURA V13/V14 (2026-10-24)
+
+Design: [architecture/integration-and-evolution.md](architecture/integration-and-evolution.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| System dependency graph with basis/source, persisted per commit; runtime edges from browser runs | `builder/graph.ts`, `SystemGraphSnapshot` | Verified | `graph.test.ts`; benchmark asserts runtime edge to `GET /api/expenses/summary` | Node/JS stacks; framework-specific wiring beyond route tables/Next/Express not traced | More stacks |
+| Change impact (components, routes, calling pages, tests, requirements, journeys) + conservative test selection (full suite always gates) | `graphImpact`, `selectTests` | Verified | `graph.test.ts`; benchmark records selection | Selection effectiveness vs escaped defects not yet measured over many runs | Track in RunOutcome |
+| Cross-component contract checks (route, method, body fields, env) | `integrationFindings` | Verified | `graph.test.ts`; benchmark (renamed route caught) | Body-field check is heuristic ("likely") | — |
+| Evidence-ranked diagnosis (root cause vs symptoms, ambiguous, unknown) + persisted investigations | `builder/diagnose.ts`, `Investigation` | Verified | `graph.test.ts` (env root cause, contract typo, external outage, unknown, tie); benchmark | Rule-scored, no model-assisted experiments | Targeted diagnostic commands |
+| Self-healing: single remediation, bounded, verified, infra ≠ code | engine | Verified | benchmark: defect repaired via one bounded repair task; missing provider key → BLOCKED with 0 repair attempts | — | — |
+| Resilient provider HTTP + failure injection restricted to tests | `resilience/*`, Stripe + GitHub adapters | Verified | `resilience.test.ts` (5xx retry/recover, no POST retry without idempotency key, timeout, 429, malformed, 401, cancellation, prod restriction) | Breaker integration optional per call | — |
+| Operational readiness from evidence | `factory/operations.ts`, Integration tab | Verified | `graph.test.ts` | Monitoring/backups always not_run (not connected) | Telemetry integration |
+| Version-aware product state | `versionState` | Verified | `evolution.test.ts`, benchmark | — | — |
+| Evidence-backed proposals, dedupe, obsolete closure, transparent priority, mandatory-first | `factory/maintenance.ts` | Verified | `evolution.test.ts` | No analytics/monitoring inputs (listed as missing) | — |
+| Technical-debt analyzer + dependency review (no invented versions) | `factory/debt.ts` | Verified | `evolution.test.ts` (planted issues found, clean starter has none, registry not_run) | Heuristic thresholds; no registry access | `npm audit`/registry with network |
+| Maintenance modes enforced in the backend, admin approval for sensitive work, budgets, escalation, checkpoints, resume, cancel | `runCycle`, `/evolution/*`, worker maintenance | Verified | `evolution.test.ts`; benchmark (RECOMMEND executes nothing; IMPLEMENT_ISOLATED runs approved refactor) | Single-process concurrency guard (DB count) | — |
+| Outcome learning for maintenance | `settleProposals`, learning event | Verified | benchmark (objective unknown until re-analysis) | — | — |
+| Workspace tabs (Integration, Evolution) | `components/products/evolution.tsx` | Implemented; e2e written | see verification note in the final report | — | — |
+| V12 (product specification/traceability system) | — | **Not implemented** (no V12 brief was executed) | — | V13/V14 reuse brief requirement ids, task traceability and feature contracts instead | — |
 
 ## Learning from builds — AURA V11 (2026-10-24)
 

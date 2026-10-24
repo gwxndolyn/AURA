@@ -80,8 +80,8 @@ describe.skipIf(realDocker)("engineering run with the docker CLI test double (ho
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_BASE_URL;
     resetClientForTests();
-    await prisma.company.deleteMany({ where: { id: ws } });
-    await prisma.user.deleteMany({ where: { id: user } });
+    if (ws) await prisma.company.deleteMany({ where: { id: ws } });
+    if (user) await prisma.user.deleteMany({ where: { id: user } });
     await prisma.$disconnect();
     for (const d of roots) rmSync(d, { recursive: true, force: true });
   });

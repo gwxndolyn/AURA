@@ -41,7 +41,7 @@ export interface BrowserFinding { kind: "load_failed" | "page_error" | "console_
 export interface BrowserResult {
   status: "passed" | "failed" | "unavailable";
   reason?: string;
-  routes: { route: string; viewport: string; httpStatus: number | null; screenshot: string | null; ms: number }[];
+  routes: { route: string; viewport: string; httpStatus: number | null; screenshot: string | null; ms: number; requests?: { method: string; path: string; status: number }[] }[];
   findings: BrowserFinding[];
   journeys: { name: string; status: "passed" | "failed" | "not_run"; detail: string }[];
   durationMs: number;
@@ -155,7 +155,13 @@ export async function verifyInBrowser(args: { treeDir: string; buildId: string; 
         page.on("pageerror", (e: Error) => errors.push(e.message));
         page.on("console", (m: { type: () => string; text: () => string; location: () => { url?: string } }) => m.type() === "error" && !(m.location()?.url ?? "").endsWith("/favicon.ico") && consoleErrors.push(m.text()));
         const own = (u: string) => u.startsWith(base) && !u.endsWith("/favicon.ico"); // browsers probe favicon.ico unprompted
-        page.on("response", (res: { url: () => string; status: () => number }) => own(res.url()) && res.status() >= 400 && failed.push(`${res.status()} ${res.url().slice(base.length)}`));
+        const requests: { method: string; path: string; status: number }[] = [];
+        page.on("response", (res: { url: () => string; status: () => number; request: () => { method: () => string } }) => {
+          if (!own(res.url())) return;
+          const p = new URL(res.url()).pathname;
+          if (p.startsWith("/api/") && requests.length < 50) requests.push({ method: res.request().method(), path: p, status: res.status() });
+          if (res.status() >= 400) failed.push(`${res.status()} ${res.url().slice(base.length)}`);
+        });
         page.on("requestfailed", (req: { url: () => string; failure: () => { errorText: string } | null }) => own(req.url()) && failed.push(`${req.failure()?.errorText ?? "failed"} ${req.url().slice(base.length)}`));
         const ts = Date.now();
         let status: number | null = null;
@@ -191,7 +197,7 @@ export async function verifyInBrowser(args: { treeDir: string; buildId: string; 
         } catch {
           /* screenshot optional */
         }
-        routesOut.push({ route, viewport: vp.name, httpStatus: status, screenshot: shot, ms: Date.now() - ts });
+        routesOut.push({ route, viewport: vp.name, httpStatus: status, screenshot: shot, ms: Date.now() - ts, requests });
         await page.close();
       }
       await ctx.close();

@@ -44,7 +44,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await stripe.close();
   for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_PRO", "STRIPE_PRICE_TEAM", "STRIPE_API_BASE"]) delete process.env[k];
-  await prisma.company.deleteMany({ where: { id: ws } });
+  if (ws) await prisma.company.deleteMany({ where: { id: ws } });
   await prisma.user.deleteMany({ where: { id: { in: [owner.id, member.id] } } });
   await prisma.$disconnect();
 });

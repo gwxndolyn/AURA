@@ -40,7 +40,8 @@ import { PROMPT_LIBRARY_VERSION } from "@/lib/agents/prompts";
 import { processPending } from "@/lib/learning/service";
 import { intelligenceOverview } from "@/lib/learning/workspace";
 import { startAnthropicDouble, type Double } from "../../../test/doubles/anthropic";
-import { expensesScripted, REQUEST, CHANGE_REQUEST } from "../../../test/doubles/expenses";
+import { expensesScripted, REQUEST, CHANGE_REQUEST, COUNT_REQUEST, RATES_REQUEST } from "../../../test/doubles/expenses";
+import { addRequest, decide, runCycle, collectProposals, versionState } from "./maintenance";
 
 let ready = false;
 try {
@@ -96,8 +97,9 @@ describe.skipIf(!ready)("V10 benchmark: responsive expense tracker through the r
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_BASE_URL;
     resetClientForTests();
-    await prisma.company.deleteMany({ where: { id: ws } });
-    await prisma.user.deleteMany({ where: { id: users.owner?.id } });
+    // Guard: `{ id: undefined }` is "no filter" in Prisma — never let a failed setup delete every row.
+    if (ws) await prisma.company.deleteMany({ where: { id: ws } });
+    if (users.owner?.id) await prisma.user.deleteMany({ where: { id: users.owner.id } });
     for (const d of roots) rmSync(d, { recursive: true, force: true });
   });
 
@@ -217,5 +219,76 @@ describe.skipIf(!ready)("V10 benchmark: responsive expense tracker through the r
     expect(sc.metrics.journeysPassed.value).toBeGreaterThan(0);
     expect(sc.metrics.repairSuccess.value).toBe(1);
     expect(sc.metrics.unsupportedClaims.value).toBe(0);
+  }, 900_000);
+
+  it("V13: an integration defect (client calls a non-existent route) is diagnosed across components and repaired", async () => {
+    await submitChangeRequest(ws, productId, COUNT_REQUEST, users.owner.email);
+    await until(async () => !!(await prisma.backlogItem.findFirst({ where: { productId, key: "C2.T1" } })));
+    await approveAll("scope");
+    const d = await settle();
+    const b = (await prisma.build.findFirst({ where: { productId, itemKey: "C2.T1" }, orderBy: { createdAt: "desc" } }))!;
+    const inv = await prisma.investigation.findMany({ where: { buildId: b.id }, orderBy: { attempt: "asc" } });
+    const allC2 = await prisma.build.findMany({ where: { productId, itemKey: { startsWith: "C2.T1" } }, orderBy: { createdAt: "asc" }, select: { itemKey: true, status: true, attempt: true, stopReason: true, failure: true, orchestration: true } });
+    report.v13integration = { runs: allC2.map((x) => ({ item: x.itemKey, status: x.status, attempt: x.attempt, stop: x.stopReason, failure: x.failure.slice(0, 600), attempts: JSON.parse(x.orchestration).attempts })), status: d.items.find((i) => i.key === "C2.T1")!.status, attempts: b.attempt + 1, investigations: inv.map((i) => ({ attempt: i.attempt, category: i.category, origin: i.origin, status: i.status, root: i.rootCause.slice(0, 160) })), selection: JSON.parse(b.testSelection) };
+    if (d.items.find((i) => i.key === "C2.T1")!.status !== "VERIFIED") console.log(JSON.stringify(report.v13integration, null, 2), b.failure.slice(0, 1500));
+    expect(d.items.find((i) => i.key === "C2.T1")!.status).toBe("VERIFIED");
+    expect(b.attempt).toBe(1); // one bounded repair
+    expect(inv[0]).toMatchObject({ category: "contract_mismatch", origin: "file:public/app.js", infrastructure: false, status: "RESOLVED" });
+    expect(inv[0].rootCause).toMatch(/expense-summary/);
+    const sel = JSON.parse(b.testSelection) as { selected: string[]; fullSuite: boolean; confidence: string };
+    expect(sel.fullSuite).toBe(true);
+    const browser = JSON.parse(b.browser);
+    expect(browser.status).toBe("passed");
+    // The graph of the released code has runtime-verified page→route edges.
+    const snap = await prisma.systemGraphSnapshot.findFirst({ where: { productId, NOT: { sha: { startsWith: "wip:" } } }, orderBy: { createdAt: "desc" } });
+    const g = JSON.parse(snap!.data) as { edges: { basis: string; to: string }[] };
+    expect(g.edges.some((e) => e.basis === "runtime" && e.to === "route:GET /api/expenses/summary")).toBe(true);
+  }, 900_000);
+
+  it("V13: unavailable infrastructure (missing provider key) is reported as a limitation — no code rewrite", async () => {
+    await submitChangeRequest(ws, productId, RATES_REQUEST, users.owner.email);
+    await until(async () => !!(await prisma.backlogItem.findFirst({ where: { productId, key: "C3.T1" } })));
+    await approveAll("scope");
+    await settle();
+    const b = (await prisma.build.findFirst({ where: { productId, itemKey: "C3.T1" }, orderBy: { createdAt: "desc" } }))!;
+    const inv = await prisma.investigation.findFirst({ where: { buildId: b.id } });
+    report.v13infrastructure = { status: b.status, attempts: b.attempt + 1, failure: b.failure.slice(0, 300), investigation: inv && { category: inv.category, origin: inv.origin, status: inv.status } };
+    expect(b.status).toBe("BLOCKED");
+    expect(b.attempt).toBe(0); // no repair attempts burned on application code
+    expect(b.failure).toMatch(/unavailable infrastructure or configuration — not a code defect/);
+    expect(inv).toMatchObject({ category: "configuration", origin: "env:FX_API_KEY", infrastructure: true, status: "LIMITATION" });
+    await processPending(500, [ws]);
+    const o = await prisma.runOutcome.findFirst({ where: { buildId: b.id } });
+    expect(o?.outcome).toBe("INFRA_FAILED"); // not counted against the agent
+  }, 900_000);
+
+  it("V14: an approved maintenance refactor runs isolated, preserves behaviour, and nothing is released automatically", async () => {
+    await prisma.backlogItem.updateMany({ where: { productId, key: { in: ["C3.T1", "C3"] } }, data: { status: "CANCELLED" } }); // the limitation needs a person; set aside
+    const c = await collectProposals(ws, productId);
+    expect(c.missingSources.join(" ")).toMatch(/not connected/);
+    const prop = await addRequest(ws, productId, users.owner.email, { title: "Single implementation of cents conversion", problem: "Money conversion should live in one shared helper so totals and edits cannot diverge.", components: ["src/routes/expenses.js"] });
+    await prisma.product.update({ where: { id: productId }, data: { maintenanceMode: "RECOMMEND" } });
+    expect((await runCycle(ws, productId, "bench")).executed).toEqual([]); // RECOMMEND never executes
+    await decide(ws, productId, prop.id, { email: users.owner.email, role: "OWNER" }, "approve");
+    await prisma.product.update({ where: { id: productId }, data: { maintenanceMode: "IMPLEMENT_ISOLATED" } });
+    const cyc = await runCycle(ws, productId, "bench");
+    expect(cyc.executed).toEqual([prop.id]);
+    const key = (await prisma.improvementProposal.findUniqueOrThrow({ where: { id: prop.id } })).itemKey!;
+    const d = await settle();
+    await tickProduct(ws, productId);
+    const item = d.items.find((i) => i.key === key)!;
+    const b = (await prisma.build.findFirst({ where: { productId, itemKey: key }, orderBy: { createdAt: "desc" }, include: { commands: true } }))!;
+    const full = b.commands.filter((x) => x.actor === "engine" && x.purpose === "test").pop()!;
+    const after = await prisma.improvementProposal.findUniqueOrThrow({ where: { id: prop.id } });
+    const vs = await versionState(ws, productId);
+    report.v14 = { proposals: c.proposals, cycle: cyc.summary, item: item.status, proposal: after.status, outcome: JSON.parse(after.outcome), deployed: vs.deployed.map((x) => x.sha.slice(0, 8)), verified: vs.verified?.sha?.slice(0, 8) };
+    expect(item.status).toBe("VERIFIED");
+    expect(full.exitCode).toBe(0);
+    expect(full.output).toMatch(/monthly total equals the sum/); // existing behaviour re-verified
+    expect(await readAt(ws, d.repo!.id, b.branch, "src/money.js")).toMatch(/toCents/);
+    expect(after.status).toBe("DONE");
+    expect(JSON.parse(after.outcome).objectiveMet).toBeNull(); // not claimed until re-analysis shows it
+    // Nothing was released: the deployed version is still the one from before the refactor.
+    expect(vs.deployed.every((x) => x.sha !== b.headSha)).toBe(true);
   }, 900_000);
 });

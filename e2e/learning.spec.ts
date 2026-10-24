@@ -58,3 +58,38 @@ test("engineering intelligence shows persisted records only; feedback is editabl
   const other = await api.get(`/api/companies/does-not-exist/learning`);
   expect(other.status()).toBe(404);
 });
+
+test("product Integration and Evolution tabs show persisted analysis; actions hit the backend", async ({ page }) => {
+  test.setTimeout(180_000);
+  await loginAs(page.request, "learning");
+  const api = page.request;
+  const c = (await (await api.post("/api/companies", { data: { name: "Evolution Co", mission: "m", industry: "Software" } })).json()).data.id;
+  const pr = await api.post(`/api/companies/${c}/products`, { data: { idea: "A tiny notes app used to check the evolution workspace end to end." } });
+  expect(pr.status()).toBe(201);
+  const productId = (await pr.json()).data.product?.id ?? (await pr.json()).data.id;
+
+  // Analyse the real repository (starter app) → evidence-backed proposals, or an honest empty list.
+  const an = await api.post(`/api/companies/${c}/products/${productId}/evolution`, { data: { action: "analyze" } });
+  expect(an.status()).toBe(200);
+  const req = await api.post(`/api/companies/${c}/products/${productId}/evolution`, { data: { action: "request", title: "Add keyboard shortcuts", problem: "Power users want to save with Ctrl+S" } });
+  expect(req.status()).toBe(201);
+
+  await page.goto(`/app/${c}/products/${productId}?tab=evolution`);
+  await expect(page.getByTestId("evolution")).toBeVisible();
+  await expect(page.getByTestId("evolution")).toContainText(/not deployed/);
+  const item = page.getByTestId("proposals").locator("li", { hasText: "Add keyboard shortcuts" });
+  await expect(item).toContainText(/needs approval/);
+  await item.getByRole("button", { name: "Approve" }).click();
+  await expect(item).toContainText(/approved/);
+  await page.screenshot({ path: "e2e/screenshots/evolution-1.png", fullPage: true });
+  // The backend recorded the decision (not just local UI state).
+  const ev = (await (await api.get(`/api/companies/${c}/products/${productId}/evolution`)).json()).data;
+  expect(ev.proposals.find((p: { title: string }) => p.title === "Add keyboard shortcuts").status).toBe("APPROVED");
+
+  await page.goto(`/app/${c}/products/${productId}?tab=integration`);
+  await expect(page.getByTestId("integration")).toBeVisible();
+  await expect(page.getByTestId("operations")).toContainText("Monitoring / error reporting");
+  await expect(page.getByTestId("operations")).toContainText(/not run/);
+  await expect(page.getByTestId("dependency-graph")).toBeVisible(); // built from the real starter repository by the analysis
+  await page.screenshot({ path: "e2e/screenshots/integration-1.png", fullPage: true });
+});

@@ -401,7 +401,7 @@ describe("usage, quotas and the ledger", () => {
     expect(await prisma.build.count({ where: { companyId: ws } })).toBe(0);
     expect(await prisma.auditLog.count({ where: { companyId: ws, action: "SPENDING_CAP_CHANGED" } })).toBe(1);
     await prisma.company.delete({ where: { id: ws } });
-  });
+  }, 60_000); // creates a real product + git repository
 });
 
 describe("authentication and sessions", () => {

@@ -48,6 +48,7 @@ import { integrationBase } from "@/lib/factory/base";
 import { verifyInBrowser, evidenceRoot, browserBrief, type BrowserResult } from "./browser";
 import { join } from "node:path";
 import { learningContext, recordRecipeUse } from "@/lib/learning/retrieval";
+import { snapshotGraph, selectTests, investigate, settleInvestigations, diagnosisText } from "./integration";
 import { emit as emitLearning } from "@/lib/learning/service";
 import { assessRisk, reviewPlan, handoffFor, recoveryFor, resolveDisagreement, contextPackage, type ReviewPlan, type ReviewOutcome } from "./orchestrator";
 
@@ -86,6 +87,13 @@ function contractText(raw: string) {
   delete c.evidence;
   delete c.fingerprint;
   return JSON.stringify(c).slice(0, 5000);
+}
+
+/** Env names the product's deployment target provides (null = no target configured → env checks skipped, not passed). */
+async function targetEnvNames(companyId: string, productId: string): Promise<string[] | null> {
+  const t = await prisma.deployTarget.findMany({ where: { companyId, productId }, select: { config: true, secretEnvNames: true } });
+  if (!t.length) return null;
+  return [...new Set(t.flatMap((x) => [...Object.keys(parseJSON<{ env?: Record<string, string> }>(x.config, {}).env ?? {}), ...parseJSON<string[]>(x.secretEnvNames, [])]))];
 }
 
 /** UI-visible change: browser verification applies (FRONTEND work or any change to served pages/assets). */
@@ -439,7 +447,13 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       lastKnown = after.files.map((f) => f.path);
       await checkpoint(b, jobId);
       await event(b, `Verifying ${b.itemKey} in the sandbox${impact.tests.length ? ` (${impact.tests.length} impacted test file(s) first, then the full suite)` : ""}`, "info", "qa-engineer");
-      const ver = await verify(b, tree, focusedTestCommand(after, impact.tests));
+      // Dependency graph of the changed tree + whole-app integration checks; regression tests selected from it.
+      const envProvided = await targetEnvNames(b.companyId, product.id);
+      const sys = await snapshotGraph({ companyId: b.companyId, productId: product.id, sha: `wip:${b.id}:${attempt}`, index: after, files: afterFiles, envProvided: envProvided ?? undefined });
+      const selection = selectTests(sys.graph, after, changed.map((c) => c.path), assessed.risk);
+      await update(b, { testSelection: JSON.stringify(selection) });
+      const selectedTests = [...new Set([...impact.tests, ...selection.selected])];
+      const ver = await verify(b, tree, focusedTestCommand(after, selectedTests));
       // Defects from the real failures; fixed defects are proven by the passing command run.
       const coverOf = (tests: string[]) => after.tests.filter((t) => tests.includes(t.file)).flatMap((t) => t.covers.filter((c) => !isTestFile(c)));
       // Defects come from the gating checks (the focused run repeats a subset of the full suite).
@@ -475,7 +489,10 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       // The user asked for strict scope: changes outside the planned files (and their tests) block.
       const outOfScope = firstLearning.scopeStrict && scope.length ? changed.map((c) => c.path).filter((p) => !scope.includes(p) && !isTestFile(p) && p !== "package-lock.json") : [];
       const scopeFindings: Finding[] = outOfScope.length ? [{ source: "review", severity: "medium", title: "Changes outside the task's files", detail: `The user asked AURA not to change unrelated files; this attempt changed ${outOfScope.join(", ")}`, evidence: `diff: ${outOfScope.join(", ")}`, blocking: true }] : [];
-      const findings = [...verFindings, ...impFindings, ...gateFindings, ...browserFindings, ...scopeFindings, ...rv.findings];
+      // Whole-app integration findings that involve files changed in this attempt (pre-existing ones are reported, not blamed here).
+      const integ = sys.findings.filter((f) => f.files.some((x) => changed.some((c) => c.path === x)));
+      const integFindings: Finding[] = integ.map((f) => ({ source: "impact", severity: f.severity, title: `integration ${f.kind.replace(/_/g, " ")}`, detail: `${f.detail}${f.suggestion ? ` — ${f.suggestion}` : ""}`, evidence: `system graph ${f.confidence}`, blocking: f.confidence === "confirmed" && f.kind !== "missing_env" }));
+      const findings = [...verFindings, ...impFindings, ...gateFindings, ...browserFindings, ...scopeFindings, ...integFindings, ...rv.findings];
       const blocking = findings.filter((f) => f.blocking);
       const unmet = rv.criteria.filter((c) => c.status !== "met");
       await update(b, { criteria: JSON.stringify(rv.criteria), findings: JSON.stringify(findings) });
@@ -486,10 +503,20 @@ async function runBuildInner(buildId: string, jobId: string | null) {
         await update(b, { status: "VERIFIED", phase: "done", headSha: c.sha, summary: ver.results.map((r) => `${r.command}: ${r.summary}`).join("; "), finishedAt: new Date() });
         await event(b, `${b.itemKey} verified and committed to ${b.branch} (${c.sha.slice(0, 8)})`, "success", "devops");
         await learn(b, { productId: product.id, item: { key: item.key, title: item.title }, requirements, sha: c.sha, ver, impact, fixed: att.fixed, after, afterFiles });
+        await settleInvestigations(b.companyId, b.id, true);
+        await snapshotGraph({ companyId: b.companyId, productId: product.id, sha: c.sha, index: after, files: afterFiles, envProvided: envProvided ?? undefined, observed: browserRes ? browserRes.routes.filter((r) => r.viewport === "desktop").map((r) => ({ route: r.route, requests: r.requests ?? [], journeys: browserRes!.journeys })) : undefined });
         await emitLearning({ companyId: b.companyId, type: "attempt.completed", key: `attempt:${b.id}:${attempt}`, productId: product.id, buildId: b.id, itemKey: item.key, payload: { ...attemptPayload(attempt, true), passed: true } });
         return { status: "VERIFIED", sha: c.sha };
       }
       const prior = (await retrieve(b.companyId, product.id, { signatures: openSigs, limit: 4 })).filter((m) => m.kind === "defect_solution").map((m) => ({ content: m.content, ref: `memory ${m.id.slice(-6)}` }));
+      // Cross-component investigation (graph-located, competing hypotheses ranked by evidence).
+      const lastBrowserReqs = browserRes?.routes.flatMap((r) => r.requests ?? []) ?? [];
+      const dx = await investigate({ companyId: b.companyId, productId: product.id, buildId: b.id, itemKey: item.key, attempt, graph: sys.graph, contracts: sys.findings, changed: changed.map((c) => c.path), browser: browserRes ? { findings: browserRes.findings.filter((f) => f.blocking), requests: lastBrowserReqs } : null, requirements });
+      // Unavailable infrastructure/configuration is reported, never "fixed" by rewriting application code.
+      if (dx.infrastructure) {
+        await abandonOpen(b.id);
+        throw new JobError(`Blocked by unavailable infrastructure or configuration — not a code defect: ${dx.summary}`, false, "infrastructure_limitation");
+      }
       // Category-specific recovery (not "try the same thing again").
       const recovery = att.open.length ? recoveryFor(att.open, attempt) : { action: "repair" as const, strategy: blocking.length ? "review_findings" : "unproven_criteria", tier: "same" as const, brief: blocking.length ? "Strategy (review findings): address each evidenced blocking finding below; do not argue with evidence in code." : "Strategy (unproven criteria): the code may be right but the criteria are not proven — add or fix tests that exercise each unproven criterion through the real API." };
       (orchestration.attempts as unknown[]).push({ attempt, passed: ver.passed, defects: att.open.map((d) => ({ category: d.category, occurrences: d.occurrences })), blocking: blocking.length, unmet: unmet.length, recovery: recovery.strategy, browser: browserRes ? { status: browserRes.status, findings: browserRes.findings.filter((f) => f.blocking).map((f) => `${f.kind} ${f.route}@${f.viewport}`), journeys: browserRes.journeys.map((j) => `${j.name}: ${j.status}`) } : null, decision: rv.decision?.rationale ?? null, disagreement: rv.decision?.disagreement ?? false, reviewers: rv.outcomes });
@@ -499,6 +526,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       if (recovery.action === "retry_later") throw new JobError(`${recovery.brief}`, true, "sandbox_infrastructure");
       if ("tier" in recovery && recovery.tier === "escalate") escalate = true;
       feedback = [
+        diagnosisText(dx),
         recovery.brief,
         browserRes ? browserBrief(browserRes) : "",
         diagnosisBrief(att.open, ver.results, prior),
@@ -521,6 +549,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
     await abandonOpen(b.id);
     const wip = await commitAndPush(tree, `${item.key}: work in progress (NOT verified)\n\nAURA build ${b.id} stopped${stopped ? ` (${stopped.reason})` : ` after ${b.maxRepairs + 1} attempt(s)`}.`);
     const attempts = (await prisma.build.findUnique({ where: { id: b.id }, select: { attempt: true } }))!.attempt + 1;
+    await settleInvestigations(b.companyId, b.id, false);
     await update(b, { status: "FAILED", phase: "done", headSha: wip.sha, stopReason: stopped?.reason ?? "repairs_exhausted", failure: `Not verified after ${attempts} attempt(s).${stopped ? ` Stopped early: ${stopped.detail}` : ""} Last problems:\n${feedback.slice(0, 4000)}`, finishedAt: new Date() });
     await event(b, `${b.itemKey} could not be verified after ${attempts} attempt(s)${stopped ? " (repeated failure detected)" : ""} — needs a person`, "danger");
     return { status: "FAILED" };

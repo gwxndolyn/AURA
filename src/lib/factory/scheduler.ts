@@ -29,6 +29,7 @@ import { mayAutoDispatch, needsApproval, type Autonomy } from "./policy";
 import { loadProduct, limitsOf, setItemStatus, appendItemHistory, movePhase, productEvent, requestApproval, type Evidence, type ProductRow } from "./store";
 import { missingInputs } from "@/lib/builder/orchestrator";
 import { syncFeatureContracts } from "./contract";
+import { settleProposals } from "./maintenance";
 import { produceDesign, produceArchitecture } from "./artifacts";
 
 const LEASE_MS = 60_000;
@@ -230,6 +231,8 @@ export async function tickProduct(companyId: string, productId: string, opts: { 
       slots--;
     }
 
+    // Maintenance proposals follow their tasks' verified outcomes.
+    await settleProposals(companyId, productId).catch(() => null);
     // Feature contracts: one shared definition per story; a changed definition flags already-verified tasks.
     const contractChanges = await syncFeatureContracts(companyId, productId).catch(() => []);
     for (const c of contractChanges) if (c.affected.length) await productEvent(companyId, productId, `Feature contract ${c.story} changed (v${c.version}); verified work to re-check: ${c.affected.join(", ")}`, { level: "warning", actor: "product-manager" });

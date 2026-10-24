@@ -31,7 +31,7 @@ export interface CodeIndexData {
   tests: { file: string; covers: string[] }[];
   routes: Route[];
   schema: { file: string; kind: "prisma" | "sql"; entities: string[] }[];
-  contracts: { file: string; method: string; path: string }[];
+  contracts: { file: string; method: string; path: string; open?: boolean }[];
   config: { language: string; framework: string | null; packageManager: string | null; testCommand: string | null; scripts: Record<string, string>; dependencies: Record<string, string> };
   limitations: string[];
 }
@@ -126,10 +126,25 @@ function routesIn(path: string, src: string): Route[] {
   return out;
 }
 
+/**
+ * Client → API calls: fetch() and common thin wrappers (api/request/apiFetch/http) with a string-literal
+ * path. A literal followed by a query string or "+ expr" is a PREFIX (`open`): "/api/x/" + id matches
+ * /api/x/:id, "/api/x" + "?q=…" matches /api/x.
+ */
 function contractsIn(path: string, src: string) {
-  const out: { file: string; method: string; path: string }[] = [];
-  for (const m of src.matchAll(/fetch\(\s*["'`](\/api\/[^"'`?$]*)["'`](?:\s*,\s*\{[^}]*?method:\s*["'](\w+)["'])?/g)) out.push({ file: path, method: (m[2] ?? "GET").toUpperCase(), path: m[1] });
+  const out: { file: string; method: string; path: string; open?: boolean }[] = [];
+  const re = /\b(?:fetch|api|request|apiFetch|http)\(\s*["'`](\/api\/[^"'`?$]*)(\?[^"'`]*)?["'`]((?:\s*\+\s*(?:[^,()]|\([^()]*\))+)?)(?:\s*,\s*\{[^}]*?method:\s*["'](\w+)["'])?/g;
+  for (const m of src.matchAll(re)) out.push({ file: path, method: (m[4] ?? "GET").toUpperCase(), path: m[1], ...(m[2] || m[3].trim() ? { open: true } : {}) });
   return out;
+}
+
+/** Does a client call (possibly a prefix) hit a server route path (with :params)? */
+export function contractMatches(routePath: string, c: { path: string; open?: boolean }) {
+  const re = new RegExp(`^${routePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/:\w+/g, "[^/]+")}$`);
+  if (re.test(c.path)) return true;
+  if (!c.open) return false;
+  if (c.path.endsWith("/")) return routePath.startsWith(c.path) && routePath.length > c.path.length; // "/api/x/" + id
+  return re.test(c.path) || routePath === c.path; // query appended
 }
 
 function schemaIn(path: string, src: string) {
@@ -355,11 +370,10 @@ export function analyzeChange(args: {
     if (outside.length) flags.push({ kind: "unintended_file", severity: "low", confidence: "warning", detail: `Changed outside the task's declared files: ${outside.join(", ")}`, files: outside });
   }
 
-  const routeSet = after.routes.map((r) => ({ method: r.method, re: new RegExp(`^${r.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/:\w+/g, "[^/]+")}$`) }));
   if (after.routes.length) {
     for (const c of after.contracts) {
       if (!changed.includes(c.file) && !after.routes.some((r) => changed.includes(r.file))) continue;
-      if (!routeSet.some((r) => r.method === c.method && r.re.test(c.path))) flags.push({ kind: "contract_mismatch", severity: "high", confidence: "warning", detail: `${c.file} calls ${c.method} ${c.path}, which no server route handles`, files: [c.file] });
+      if (!after.routes.some((r) => r.method === c.method && contractMatches(r.path, c))) flags.push({ kind: "contract_mismatch", severity: "high", confidence: "warning", detail: `${c.file} calls ${c.method} ${c.path}, which no server route handles`, files: [c.file] });
     }
   }
 

@@ -8,6 +8,7 @@
  * requests (read & write), Metadata (read), Checks (read). GITHUB_API_BASE
  * may point at GitHub Enterprise (or a test double in automated tests only).
  */
+import { resilientFetch, type ProviderHttpError } from "@/lib/resilience/http";
 import { createSign } from "node:crypto";
 import { ApiError } from "@/lib/api";
 
@@ -38,10 +39,14 @@ export class GithubError extends ApiError {
 }
 
 export async function gh<T>(path: string, init: { method?: string; token: string; body?: unknown }): Promise<T> {
-  const r = await fetch(`${API()}${path}`, {
+  // Reads retry on 429/5xx/timeouts; writes (POST: create PR, tokens) are not retried blindly.
+  const r = await resilientFetch(`${API()}${path}`, {
     method: init.method ?? "GET",
     headers: { Authorization: `Bearer ${init.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "AURA", ...(init.body ? { "Content-Type": "application/json" } : {}) },
     body: init.body ? JSON.stringify(init.body) : undefined,
+  }, { provider: "github", timeoutMs: 15_000 }).catch((e) => {
+    const k = (e as ProviderHttpError).kind;
+    throw new GithubError(k === "timeout" ? "GitHub did not respond in time" : k === "rate_limited" ? "GitHub rate limit reached; try again later" : `GitHub unavailable: ${(e as Error).message}`, k === "rate_limited" ? 429 : 502, k === "rate_limited" ? "rate_limited" : "unavailable");
   });
   if (r.status === 204) return undefined as T;
   const json = (await r.json().catch(() => ({}))) as T & { message?: string };

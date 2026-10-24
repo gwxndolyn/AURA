@@ -10,6 +10,7 @@ import { PageHeader, ErrorState, Skeleton, Badge } from "@/components/ui/primiti
 import { useApp } from "@/lib/store";
 import { cn, timeAgo } from "@/lib/utils";
 import { GateTab, DefectsTab, MemoryTab, CodeTab, ImpactView, type Impact } from "@/components/products/engineering";
+import { IntegrationTab, EvolutionTab } from "@/components/products/evolution";
 import { DeliveryTab, ChangesTab } from "@/components/products/delivery";
 
 type Ev = { kind: string; ref: string; detail: string };
@@ -31,7 +32,7 @@ interface Detail {
 }
 interface Readiness { checks: { id: string; label: string; status: string; detail: string }[]; summary: { passed: number; failed: number; notRun: number; notApplicable: number }; canCreateCandidate: boolean; note: string }
 
-const TABS = ["overview", "brief", "backlog", "runs", "defects", "design", "approvals", "quality", "release", "deploy", "changes", "memory", "code", "repository", "timeline"] as const;
+const TABS = ["overview", "brief", "backlog", "runs", "defects", "integration", "evolution", "design", "approvals", "quality", "release", "deploy", "changes", "memory", "code", "repository", "timeline"] as const;
 type Tab = (typeof TABS)[number];
 const STATUS_TONE: Record<string, "success" | "warning" | "danger" | "neutral" | "info"> = { VERIFIED: "success", DONE_UNVERIFIED: "neutral", IN_PROGRESS: "info", IN_REVIEW: "info", READY: "neutral", TODO: "neutral", FAILED: "danger", BLOCKED: "warning", CANCELLED: "neutral" };
 const VERIFY_ICON: Record<string, React.ReactNode> = { PASSED: <CheckCircle2 className="h-3.5 w-3.5 text-success" />, FAILED: <XCircle className="h-3.5 w-3.5 text-danger" />, BLOCKED: <AlertTriangle className="h-3.5 w-3.5 text-warning" />, RUNNING: <Loader2 className="h-3.5 w-3.5 animate-spin text-brand" />, INCONCLUSIVE: <CircleDashed className="h-3.5 w-3.5 text-text-faint" />, NOT_RUN: <CircleDashed className="h-3.5 w-3.5 text-text-faint" /> };
@@ -148,6 +149,8 @@ function ProductControlCentre({ params }: { params: Promise<{ id: string; produc
       {tab === "backlog" && <Backlog d={d} sel={sel} setSel={setSel} companyId={id} base={base} canAct={canAct} act={act} openRun={(r) => { setRun(r); go("runs"); }} />}
       {tab === "runs" && <RunsTab companyId={id} productId={productId} run={run} setRun={setRun} canAct={canAct} version={version} />}
       {tab === "defects" && <DefectsTab base={base} version={version} openRun={(r) => { setRun(r); go("runs"); }} />}
+      {tab === "integration" && <IntegrationTab base={base} openRun={(r) => { setRun(r); go("runs"); }} />}
+      {tab === "evolution" && <EvolutionTab base={base} canAct={canAct} isAdmin={["OWNER", "ADMIN"].includes(d.role)} />}
       {tab === "quality" && <GateTab base={base} canAct={canAct} isAdmin={["OWNER", "ADMIN"].includes(d.role)} version={version} />}
       {tab === "deploy" && <DeliveryTab base={base} canAct={canAct} isAdmin={["OWNER", "ADMIN"].includes(d.role)} version={version} />}
       {tab === "changes" && <ChangesTab base={base} canAct={canAct} version={version} />}

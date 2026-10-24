@@ -107,7 +107,7 @@ export async function collectOutcome(companyId: string, buildId: string) {
   if (b.status === "BLOCKED") {
     const envOnly = attributions.length > 0 && attributions.every((a) => a.scope === "environment" || a.scope === "external");
     if (b.stopReason === "budget") { outcome = "BUDGET_STOPPED"; cls = "budget"; }
-    else if (envOnly || /sandbox|provider|unavailable|Docker/i.test(b.failure)) { outcome = "INFRA_FAILED"; cls = /provider/i.test(b.failure) ? "external" : "environment"; }
+    else if (envOnly || /sandbox|provider|unavailable|Docker|infrastructure or configuration/i.test(b.failure)) { outcome = "INFRA_FAILED"; cls = /provider/i.test(b.failure) ? "external" : "environment"; }
   }
   const tests = b.commands.map((c) => ({ command: c.command, purpose: c.purpose, exitCode: c.exitCode, timedOut: c.timedOut, ran: c.exitCode !== null || c.timedOut }));
   const testRuns = tests.filter((t) => t.purpose === "test");

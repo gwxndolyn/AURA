@@ -188,6 +188,10 @@ model Company {
   attributions    FailureAttribution[]
   recipeUses      RecipeApplication[]
   feedback        UserFeedback[]
+  systemGraphs    SystemGraphSnapshot[]
+  investigations  Investigation[]
+  proposals       ImprovementProposal[]
+  maintenanceRuns MaintenanceCycle[]
 
   @@index([ownerId])
 }
@@ -1285,6 +1289,9 @@ model Product {
   planningStatus String   @default("READY") // QUEUED | RUNNING | READY | FAILED (AI planning job)
   planningError  String   @default("")
   autonomy       String   @default("SUPERVISED") // SUGGEST | SUPERVISED | BOUNDED | CONTINUOUS
+  // V14 maintenance policy: OBSERVE | RECOMMEND | IMPLEMENT_ISOLATED | AUTONOMOUS, enforced by src/lib/factory/maintenance.ts
+  maintenanceMode String  @default("RECOMMEND")
+  maintenanceBudget String @default("{}") // {maxConcurrent, maxAttemptsPerIssue, maxChangesPerCycle, maxCycleMs, maxUnreviewed}
   scopeApproved  Boolean  @default(false)
   scopeApprovedBy String?
   scopeApprovedAt DateTime?
@@ -1556,6 +1563,8 @@ model Build {
   taskMemory String @default("{}")
   // Which memories/recipes/preferences were retrieved for the last attempt and why: [{source, ref, kind, status, reason, score}].
   retrievalManifest String @default("[]")
+  // V13: test selection for the attempt: {changed, selected[], reasons[], confidence, fullSuite, why}.
+  testSelection String @default("{}")
   container   String?  // name of the sandbox container currently executing (cancellation kills it)
   correlationId String
   createdBy   String
@@ -2294,4 +2303,105 @@ model UserFeedback {
   updatedAt    DateTime @updatedAt
 
   @@index([companyId, productId, status])
+}
+
+
+// ---------------------------------------------------------------------------
+// V13 integration intelligence + V14 product evolution
+// ---------------------------------------------------------------------------
+
+// Dependency graph of a product at one commit (src/lib/builder/graph.ts). Nodes/edges carry basis (runtime|static|inferred) + source.
+model SystemGraphSnapshot {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId String
+  sha       String
+  data      String   // JSON SystemGraph
+  findings  String   @default("[]") // JSON ContractFinding[] (whole-app integration checks)
+  createdAt DateTime @default(now())
+
+  @@unique([productId, sha])
+  @@index([companyId, productId, createdAt])
+}
+
+// One cross-component investigation of a failed attempt (src/lib/builder/diagnose.ts).
+model Investigation {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  buildId     String
+  itemKey     String
+  attempt     Int
+  symptoms    String   @default("[]")
+  hypotheses  String   @default("[]")
+  rootCause   String   @default("") // statement of the selected hypothesis ("" when ambiguous/unknown)
+  category    String   @default("unknown")
+  origin      String   @default("")
+  ambiguous   Boolean  @default(false)
+  infrastructure Boolean @default(false) // the cause is unavailable infrastructure/config: no code fix
+  status      String   @default("OPEN") // OPEN | REPAIRING | RESOLVED | UNRESOLVED | LIMITATION
+  remediationKey String? // backlog item that carries the repair (single, deduplicated)
+  requirements String  @default("[]")
+  createdAt   DateTime @default(now())
+  resolvedAt  DateTime?
+
+  @@unique([buildId, attempt])
+  @@index([companyId, productId, createdAt])
+}
+
+// Evidence-backed improvement proposal (V14). Deduplicated by fingerprint; never executed without policy/approval.
+model ImprovementProposal {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId    String
+  fingerprint  String   // stable identity: source + subject (duplicates merge)
+  source       String   // defect | security | debt | dependency | requirement | feedback | incident | lesson | user_request
+  title        String
+  problem      String
+  evidence     String   @default("[]") // [{kind, ref, detail}]
+  impact       String   @default("")
+  components   String   @default("[]")
+  requirements String   @default("[]")
+  benefit      String   @default("") // qualitative: high | medium | low (+ why) — no invented numbers
+  effort       String   @default("medium") // small | medium | large
+  uncertainty  String   @default("medium")
+  risk         String   @default("medium") // regression risk
+  mandatory    Boolean  @default(false) // security / data integrity: never deprioritised below optional work
+  verification String   @default("[]")
+  approval     String   @default("required") // required | policy (low-risk, eligible for autonomous maintenance)
+  priority     Float    @default(0)
+  priorityWhy  String   @default("[]") // inspectable reasoning
+  status       String   @default("OPEN") // OPEN | APPROVED | REJECTED | IN_PROGRESS | DONE | NO_CHANGE_NEEDED | OBSOLETE | MERGED | FAILED
+  itemKey      String?  // backlog task created when approved
+  attempts     Int      @default(0)
+  outcome      String   @default("{}") // {result, evidence, objectiveMet: true|false|null}
+  decidedBy    String?
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([productId, fingerprint])
+  @@index([companyId, productId, status])
+}
+
+// One bounded maintenance cycle (analyse → propose → optionally execute) with persisted checkpoints.
+model MaintenanceCycle {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  mode        String   // OBSERVE | RECOMMEND | IMPLEMENT_ISOLATED | AUTONOMOUS
+  status      String   @default("RUNNING") // RUNNING | COMPLETED | PAUSED | CANCELLED | FAILED
+  checkpoint  String   @default("{}") // {step, proposals[], executed[], skipped[]}
+  summary     String   @default("")
+  budget      String   @default("{}")
+  createdBy   String
+  jobId       String?
+  createdAt   DateTime @default(now())
+  finishedAt  DateTime?
+
+  @@index([companyId, productId, createdAt])
 }

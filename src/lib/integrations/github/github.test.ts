@@ -48,7 +48,7 @@ afterAll(async () => {
   await gh.close();
   for (const k of ["GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_APP_PRIVATE_KEY", "GITHUB_API_BASE"]) delete process.env[k];
   await prisma.company.deleteMany({ where: { id: { in: [ws, freeWs] } } });
-  await prisma.user.deleteMany({ where: { id: user } });
+  if (user) await prisma.user.deleteMany({ where: { id: user } });
   await prisma.$disconnect();
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });

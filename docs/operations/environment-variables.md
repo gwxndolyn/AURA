@@ -70,6 +70,7 @@ The doc validator checks that everything in `.env.example` appears here.
 | `AURA_BROWSER_VERIFY` | `0` disables browser verification (reported as not run) | `builder/browser.ts` |
 | `AURA_EVIDENCE_ROOT` | Directory for browser screenshots (default OS temp) | `builder/browser.ts` |
 | `AURA_ALLOW_SIMULATED_PROMOTION` | Automated tests only: lets a prompt be promoted on simulated-provider evidence (never set in production) | `intelligence/experiments.ts` |
+| `AURA_FAULT_INJECTION` | `1` enables failure injection **only** when `NODE_ENV=test` (resilience tests); ignored everywhere else | `resilience/inject.ts` |
 | `AURA_MAINTENANCE_INTERVAL_MS` | Worker maintenance tick (retention, quota-hold recovery, token purge); default 15 min | `jobs/worker.ts` |
 
 ## Named by configuration (you choose the names)
