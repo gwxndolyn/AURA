@@ -1,0 +1,39 @@
+# Optional infrastructure for AURA. The app runs with SQLite + in-memory events
+# out of the box (no Docker needed). Use this to run PostgreSQL + Redis instead.
+#
+#   docker compose up -d
+#   # then set in .env:
+#   #   DATABASE_URL="postgresql://aura:aura@localhost:5432/aura?schema=public"
+#   #   REDIS_URL="redis://localhost:6379"
+#   # and change provider to "postgresql" in prisma/schema.prisma, then:
+#   npm run db:push && npm run db:seed
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aura-postgres
+    environment:
+      POSTGRES_USER: aura
+      POSTGRES_PASSWORD: aura
+      POSTGRES_DB: aura
+    ports:
+      - "5432:5432"
+    volumes:
+      - aura-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aura"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: aura-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - aura-redis:/data
+
+volumes:
+  aura-pg:
+  aura-redis:

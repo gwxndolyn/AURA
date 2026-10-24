@@ -1,0 +1,1972 @@
+// AURA — Prisma schema
+// Default provider is SQLite for zero-config local dev. To use PostgreSQL
+// (docker-compose provided), switch provider to "postgresql" and update
+// DATABASE_URL. Enum-like fields are stored as String for SQLite portability;
+// allowed values are enforced in application code (src/lib/types.ts + Zod).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  // scrypt hash in "salt:hash" hex form; null for OAuth-only or legacy users.
+  passwordHash  String?
+  // Per-user guided-onboarding progress (JSON: { completedAt?, skippedAt?, steps: string[] }).
+  onboarding    String    @default("{}")
+  createdAt     DateTime  @default(now())
+  companies     Company[] // companies this user owns (ownerId)
+  memberships   WorkspaceMember[]
+  resetTokens   PasswordResetToken[]
+  deletedAt     DateTime? // account deletion request (data removed by deleteAccount)
+}
+
+// Workspace membership: scopes a user to a company with a role.
+// Roles: OWNER | ADMIN | MEMBER | VIEWER
+model WorkspaceMember {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role      String   @default("MEMBER")
+  createdAt DateTime @default(now())
+
+  @@unique([userId, companyId])
+  @@index([companyId])
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique // sha256 of the raw token
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Company {
+  id            String   @id @default(cuid())
+  name          String
+  mission       String
+  industry      String
+  personality   String   @default("balanced")
+  autonomy      String   @default("BALANCED") // ASSISTED | BALANCED | AUTONOMOUS
+  status        String   @default("BUILDING") // BUILDING|OPERATING|INCIDENT|UNDER_ATTACK|RECOVERING
+  isDemo        Boolean  @default(false)
+  // Demo reset lease: set while a reset is in progress so concurrent resets are refused.
+  demoLockUntil DateTime?
+
+  // Financials & metrics
+  cash          Float    @default(500000)
+  revenue       Float    @default(0)
+  expenses      Float    @default(0)
+  customers     Int      @default(0)
+  valuation     Float    @default(0)
+  reputation    Float    @default(50)   // 0-100
+  uptime        Float    @default(100)  // percent
+  securityScore Int      @default(50)   // 0-100
+  technicalDebt Int      @default(10)   // 0-100
+  velocity      Int      @default(20)
+  simDay        Int      @default(0)
+  simSpeed      Int      @default(1)
+  simRunning    Boolean  @default(false)
+
+  // Workspace-level AI budget limits (USD). Enforced server-side.
+  dailyBudgetUsd   Float @default(25)
+  monthlyBudgetUsd Float @default(500)
+
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members   WorkspaceMember[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agents          Agent[]
+  projects        Project[]
+  tasks           Task[]
+  sprints         Sprint[]
+  deployments     Deployment[]
+  incidents       Incident[]
+  findings        SecurityFinding[]
+  nodes           InfrastructureNode[]
+  events          SimulationEvent[]
+  customersList   Customer[]
+  decisions       Decision[]
+  metrics         Metric[]
+  workspaces      CodeWorkspace[]
+  agentRuns       AgentRun[]
+  auditLogs       AuditLog[]
+  timelineEvents  TimelineEvent[]
+  agentMessages   AgentMessage[]
+  promptTemplates PromptTemplate[]
+  evaluations     Evaluation[]
+  experiments     PromptExperiment[]
+  promotions      PromptPromotion[]
+  knowledge       KnowledgeEntry[]
+  routingPolicy   RoutingPolicyConfig?
+  missions        Mission[]
+  opsFindings     OpsFinding[]
+  opsActions      OpsAction[]
+  opsMonitor      OpsMonitor?
+  opsEvaluations  OpsEvaluation[]
+  notifications   Notification[]
+  twinConfig      TwinConfig?
+  twinRuns        TwinRun[]
+  products        Product[]
+  repoConnections RepoConnection[]
+  jobs            Job[]
+  builds          Build[]
+  subscription    Subscription?
+  usageEvents     UsageEvent[]
+  githubInstalls  GithubInstallation[]
+  defects         Defect[]
+  projectMemories ProjectMemory[]
+  codeIndexes     CodeIndex[]
+  labRuns         LabRun[]
+  labExperiments  LabExperiment[]
+  goals           Goal[]
+  deployTargets   DeployTarget[]
+  productDeploys  ProductDeployment[]
+  schedules       Schedule[]
+
+  @@index([ownerId])
+}
+
+model Agent {
+  id          String  @id @default(cuid())
+  companyId   String
+  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key         String  // architect, frontend-engineer, ...
+  name        String
+  role        String
+  avatar      String  // initials / emoji
+  color       String
+  personality String
+  status      String  @default("IDLE") // IDLE|THINKING|WORKING|WAITING|BLOCKED|FAILED|COMPLETED
+  currentTask String?
+
+  tokensIn    Int   @default(0)
+  tokensOut   Int   @default(0)
+  cost        Float @default(0)
+  tasksDone   Int   @default(0)
+  tasksFailed Int   @default(0)
+
+  available   Boolean @default(true) // for agent-unavailable / reassignment tests
+  permissions String  @default("[]") // JSON array of allowed tool names
+
+  memories AgentMemory[]
+  runs     AgentRun[]
+  tasks    Task[]
+  sentMsgs     AgentMessage[] @relation("msgFrom")
+  receivedMsgs AgentMessage[] @relation("msgTo")
+
+  @@unique([companyId, key])
+  @@index([companyId])
+}
+
+model AgentMessage {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fromId     String
+  from       Agent    @relation("msgFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId       String
+  to         Agent    @relation("msgTo", fields: [toId], references: [id], onDelete: Cascade)
+  type       String   // BUG_REPORT | HANDOFF | QUESTION | DECISION | NOTIFY
+  message    String
+  severity   String   @default("INFO") // INFO|LOW|MEDIUM|HIGH|CRITICAL
+  taskId     String?
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([toId, read])
+}
+
+model AgentMemory {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  kind      String   @default("short") // short | long
+  content   String
+  relevance Float    @default(1)
+  createdAt DateTime @default(now())
+
+  @@index([agentId, kind])
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now())
+  tasks       Task[]
+
+  @@index([companyId])
+}
+
+model Sprint {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  status    String   @default("ACTIVE")
+  startDay  Int      @default(0)
+  endDay    Int      @default(14)
+  tasks     Task[]
+
+  @@index([companyId])
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  sprintId    String?
+  sprint      Sprint?  @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+  assigneeId  String?
+  assignee    Agent?   @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String
+  priority    String   @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  status      String   @default("BACKLOG") // BACKLOG|PLANNED|IN_PROGRESS|REVIEW|TESTING|DONE|BLOCKED
+  acceptance  String   @default("[]") // JSON array of criteria strings
+  dependsOn   String   @default("[]") // JSON array of task ids
+  estimate    Int      @default(3)
+  actual      Int      @default(0)
+
+  // Autonomous prioritization inputs + computed score (see lib/workflows/prioritize.ts)
+  businessImpact Int   @default(3) // 1-5
+  urgency        Int   @default(3) // 1-5
+  securityRisk   Int   @default(1) // 1-5
+  priorityScore  Float @default(0)
+  priorityReason String @default("")
+  attempts       Int   @default(0) // self-healing rework attempts
+
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([companyId, status])
+  @@index([assigneeId])
+}
+
+model Deployment {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  env       String   @default("production") // production|staging|development
+  version   String
+  commit    String
+  status    String   @default("PENDING") // PENDING|RUNNING|SUCCESS|FAILED|ROLLED_BACK
+  rolledBackFrom String? // id of the deployment this rollback reverted
+  stage     String   @default("BUILD")    // BUILD|TEST|SECURITY_SCAN|DEPLOY|HEALTH_CHECK
+  stages    String   @default("[]")       // JSON array of {name,status,durationMs}
+  durationMs Int     @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+}
+
+model Incident {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  number      Int
+  title       String
+  severity    String   @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  status      String   @default("ACTIVE") // ACTIVE|CONTAINED|RESOLVED
+  attackType  String?
+  target      String?
+  summary     String   @default("")
+  timeline    String   @default("[]") // JSON array of {ts,actor,message}
+  evidence    String   @default("[]") // JSON array
+  findingId   String?
+  detectedAt  DateTime @default(now())
+  resolvedAt  DateTime?
+
+  @@index([companyId, status])
+}
+
+model SecurityFinding {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code        String   // AURA-2026-001
+  title       String
+  category    String   // authentication|authorization|network|...
+  severity    String   @default("MEDIUM")
+  status      String   @default("OPEN") // OPEN|PATCHING|FIXED|VERIFIED
+  affected    String
+  discoveredBy String
+  fixedBy     String?
+  verifiedBy  String?
+  description String
+  cvss        Float    @default(5.0)
+  createdAt   DateTime @default(now())
+
+  @@index([companyId, status])
+}
+
+model InfrastructureNode {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key       String   // waf, lb, api, app, db, auth, payment, admin, logging
+  label     String
+  kind      String
+  status    String   @default("HEALTHY") // HEALTHY|DEGRADED|DOWN|UNDER_ATTACK
+  cpu       Float    @default(20)
+  memory    Float    @default(30)
+  latencyMs Float    @default(45)
+  errorRate Float    @default(0.1)
+  rps       Float    @default(120)
+  posX      Float    @default(0)
+  posY      Float    @default(0)
+
+  @@unique([companyId, key])
+  @@index([companyId])
+}
+
+model SimulationEvent {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type      String
+  actor     String?  // agent key or "system"
+  actorName String?
+  role      String?
+  message   String
+  level     String   @default("info") // info|success|warning|danger
+  meta      String   @default("{}")
+  simDay    Int      @default(0)
+  // Operational fields (set for engineering-operations events; null for plain activity).
+  severity     String?  // info | low | medium | high | critical
+  source       String?  // missions | agents | sandbox | deploy | security | evaluation | ops
+  resourceType String?  // mission | task | run | agent | tool | deployment | incident | evaluation | integration
+  resourceId   String?
+  dedupeKey    String?
+  resolution   String?  // open | resolved (ops events only)
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([companyId, dedupeKey])
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  persona   String
+  mrr       Float    @default(0)
+  satisfaction Float @default(70)
+  status    String   @default("ACTIVE") // ACTIVE|CHURNED|TRIAL
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+}
+
+model Decision {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  question   String
+  options    String   @default("[]") // JSON array
+  evidence   String   @default("[]")
+  consulted  String    @default("[]")
+  choice     String?
+  rationale  String?
+  outcome    String?
+  status     String   @default("OPEN") // OPEN|DECIDED
+  createdAt  DateTime @default(now())
+
+  @@index([companyId])
+}
+
+model Metric {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  simDay    Int
+  revenue   Float
+  customers Int
+  cash      Float
+  uptime    Float
+  securityScore Int
+  incidents Int
+  technicalDebt Int
+  createdAt DateTime @default(now())
+
+  @@index([companyId, simDay])
+}
+
+model CodeWorkspace {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String   @default("project")
+  files     String   @default("{}") // JSON map path -> content (the CURRENT revision)
+  revision  Int      @default(0)    // project revision; bumped on every applied write
+  fileRevs  String   @default("{}") // JSON map path -> per-file revision (optimistic concurrency)
+  template  String?  // fixture repo id when seeded from one (e.g. checkout-validation)
+  updatedAt DateTime @updatedAt
+  versions  FileVersion[]
+  changes   FileChange[]
+  runs      ExecRun[]
+
+  @@index([companyId])
+}
+
+// Immutable history: one row per file per applied project revision.
+model FileVersion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  workspace   CodeWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  companyId   String
+  path        String
+  revision    Int      // project revision this version belongs to
+  fileRev     Int      // per-file revision
+  op          String   // create | modify | delete
+  content     String   // full content after the op ("" for delete); bounded by MAX_FILE_BYTES
+  sha256      String
+  author      String   // user email or agent key
+  changeId    String?  // FileChange that produced it (null for direct edits)
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, path, revision])
+}
+
+// A proposed/applied change to one file, with provenance back to the mission machinery.
+model FileChange {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  workspace    CodeWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  companyId    String
+  path         String
+  op           String   // create | modify | delete
+  source       String   // agent | user
+  author       String   // agent key or user email
+  missionId    String?
+  taskKey      String?
+  runId        String?  // MissionTaskRun id
+  fileArtifactId String? // MissionArtifact(FILE) holding the proposed content
+  diffArtifactId String?
+  explanation  String   @default("")
+  baseRev      Int      // per-file revision the change was made against
+  baseSha256   String
+  newSha256    String
+  added        Int      @default(0)
+  removed      Int      @default(0)
+  status       String   @default("PROPOSED") // PROPOSED | VERIFICATION_PENDING | VERIFICATION_FAILED | VERIFIED | ACCEPTED | REJECTED | REVERTED | SUPERSEDED | CONFLICT
+  verification String   @default("{}") // JSON summary of the evidence at the time of the last check
+  appliedRevision Int?  // project revision created when accepted/applied
+  revertedRevision Int?
+  decidedBy    String?
+  decidedAt    DateTime?
+  decisionNote String   @default("")
+  history      String   @default("[]")
+  // One review record per (mission, file): concurrent syncs cannot create duplicates.
+  // Null for user changes (no mission) — SQLite treats NULLs as distinct.
+  syncKey      String?
+  createdAt    DateTime @default(now())
+
+  @@unique([companyId, syncKey])
+  @@index([workspaceId, status])
+  @@index([companyId, missionId])
+}
+
+// One allowlisted check executed in the sandbox against a specific project revision.
+model ExecRun {
+  id          String   @id @default(cuid())
+  workspaceId String
+  workspace   CodeWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  companyId   String
+  check       String   // unit-tests | syntax
+  command     String   // the exact allowlisted command
+  revision    Int      // project revision executed (or the change overlay)
+  changeId    String?  // when running a proposed change on top of the revision
+  status      String   @default("QUEUED") // QUEUED | RUNNING | PASSED | FAILED | ERROR | CANCELLED | TIMED_OUT | UNSUPPORTED
+  mode        String   @default("") // docker | unavailable
+  exitCode    Int?
+  passed      Int?
+  failed      Int?
+  total       Int?
+  failedNames String   @default("[]")
+  output      String   @default("") // bounded
+  truncated   Boolean  @default(false)
+  container   String?  // docker container name, for cancellation
+  requestedBy String
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+model AgentRun {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  objective String
+  model     String
+  tier      String   // FAST|STANDARD|REASONING
+  tokensIn  Int      @default(0)
+  tokensOut Int      @default(0)
+  cacheReadTokens  Int @default(0)
+  cacheWriteTokens Int @default(0)
+  usageSource String @default("unknown") // provider | estimated | unknown
+  mode      String   @default("unknown") // live | simulation (simulator output — never shown as model output)
+  cost      Float    @default(0)
+  latencyMs Int      @default(0)
+  status    String   @default("RUNNING") // RUNNING|COMPLETED|FAILED
+  summary   String   @default("")
+  promptVersionId String? // PromptVersion used for this run (null = built-in definitions.ts prompt)
+  promptRef       String  @default("") // "<key>@v<n>" or "builtin:<agentKey>"
+  failureCategory String?
+  toolCalls ToolCall[]
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([agentId])
+}
+
+model ToolCall {
+  id        String   @id @default(cuid())
+  runId     String
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tool      String
+  input     String   @default("{}")
+  output    String   @default("{}")
+  ok        Boolean  @default(true)
+  status    String   @default("ok") // ok | denied | invalid_args | timeout | error | invalid_output | approval_required | out_of_scope
+  durationMs Int     @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actor     String
+  action    String
+  target    String
+  result    String
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+}
+
+model TimelineEvent {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title     String
+  kind      String
+  simDay    Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// AI Engineering Intelligence layer (see src/lib/intelligence/, docs/ai-engineering/intelligence.md)
+// All rows are workspace-scoped by companyId. Records hold operational summaries
+// and validated outputs only — never secrets or private reasoning traces.
+// ---------------------------------------------------------------------------
+
+// A stable prompt identity (e.g. "agent.backend-engineer.system").
+model PromptTemplate {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key         String   // stable identifier, unique per workspace
+  agentKey    String?  // agent this prompt belongs to (null = workflow prompt)
+  workflow    String   @default("agent.turn")
+  purpose     String
+  createdAt   DateTime @default(now())
+  versions    PromptVersion[]
+
+  @@unique([companyId, key])
+  @@index([companyId])
+}
+
+// Immutable prompt version. Content fields are never updated after creation;
+// only `status` (lifecycle) changes. A new edit = a new version row.
+model PromptVersion {
+  id            String   @id @default(cuid())
+  templateId    String
+  template      PromptTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  companyId     String
+  version       Int      // 1, 2, 3 … monotonic per template
+  content       String   // the system prompt template text
+  inputVars     String   @default("[]") // JSON array of variable names
+  outputContract String  @default("")   // description / JSON-shape of expected output
+  modelReqs     String   @default("{}") // JSON: { minTier?, needsStructuredOutput? }
+  datasetId     String?  // evaluation dataset this prompt is evaluated against
+  author        String
+  changelog     String   @default("")
+  contentHash   String   // sha256 of content fields — proves immutability
+  status        String   @default("DRAFT") // DRAFT|EVALUATING|APPROVED|ACTIVE|DEPRECATED|ROLLED_BACK
+  createdAt     DateTime @default(now())
+  activatedAt   DateTime?
+
+  @@unique([templateId, version])
+  @@index([companyId, status])
+}
+
+// One evaluation run of a dataset against an agent/prompt/model.
+model Evaluation {
+  id              String   @id @default(cuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  agentKey        String
+  workflow        String
+  provider        String
+  model           String
+  tier            String   @default("")
+  mode            String   // live | simulation (fixture)
+  promptVersionId String?
+  promptKey       String
+  promptVersion   Int
+  toolSchemaVersion String @default("")
+  datasetId       String
+  datasetVersion  String
+  experimentId    String?
+  label           String   @default("") // baseline | candidate | regression | adhoc
+  status          String   @default("RUNNING") // RUNNING|COMPLETED|CANCELLED|FAILED
+  total           Int      @default(0)
+  passed          Int      @default(0)
+  failed          Int      @default(0)
+  skipped         Int      @default(0)
+  passRate        Float    @default(0)
+  avgScore        Float    @default(0)
+  tokensIn        Int      @default(0)
+  tokensOut       Int      @default(0)
+  cost            Float    @default(0)
+  avgLatencyMs    Float    @default(0)
+  p50LatencyMs    Float?
+  p95LatencyMs    Float?
+  failureCounts   String   @default("[]") // JSON [{category,count}]
+  createdBy       String
+  startedAt       DateTime @default(now())
+  finishedAt      DateTime?
+  results         EvalResult[]
+
+  @@index([companyId, agentKey, startedAt])
+  @@index([companyId, promptVersionId])
+  @@index([experimentId])
+}
+
+// Per-case result.
+model EvalResult {
+  id              String   @id @default(cuid())
+  evaluationId    String
+  evaluation      Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  companyId       String
+  caseId          String
+  caseKind        String   // normal | difficult
+  tags            String   @default("[]")
+  expected        String   // JSON (redacted) of the acceptance criteria
+  actual          String   // redacted output summary (validated, truncated)
+  pass            Boolean
+  skipped         Boolean  @default(false)
+  skipReason      String   @default("")
+  score           Float    @default(0)
+  verdicts        String   @default("[]") // JSON EvaluatorVerdict[]
+  failureCategory String?
+  tokensIn        Int      @default(0)
+  tokensOut       Int      @default(0)
+  cost            Float    @default(0)
+  latencyMs       Int      @default(0)
+  telemetry       String   @default("{}") // JSON harness telemetry (model/tool calls, repairs, refusal, escalation…)
+  createdAt       DateTime @default(now())
+
+  @@index([evaluationId])
+  @@index([companyId, failureCategory])
+}
+
+// A controlled A/B experiment between two prompt versions.
+model PromptExperiment {
+  id                  String   @id @default(cuid())
+  companyId           String
+  company             Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  templateId          String
+  baselineVersionId   String
+  candidateVersionId  String
+  datasetId           String
+  datasetVersion      String
+  repetitions         Int      @default(1)
+  gateConfig          String   @default("{}")
+  status              String   @default("RUNNING") // RUNNING|COMPLETED|CANCELLED|FAILED
+  recommendation      String?  // promote | block | needs-approval
+  summary             String   @default("")
+  comparison          String   @default("{}") // JSON ComparisonResult (+ variance)
+  createdBy           String
+  createdAt           DateTime @default(now())
+  finishedAt          DateTime?
+
+  @@index([companyId, createdAt])
+}
+
+// Audited promotion / rollback decisions.
+model PromptPromotion {
+  id              String   @id @default(cuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  templateId      String
+  fromVersionId   String?
+  toVersionId     String
+  action          String   // PROMOTE | ROLLBACK | BLOCKED
+  experimentId    String?
+  gateReport      String   @default("{}")
+  approvedBy      String
+  reason          String   @default("")
+  createdAt       DateTime @default(now())
+
+  @@index([companyId, templateId, createdAt])
+}
+
+// Proposed / validated lessons from completed work. Never auto-promoted.
+model KnowledgeEntry {
+  id               String   @id @default(cuid())
+  companyId        String
+  company          Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title            String
+  lesson           String
+  evidence         String   @default("[]") // JSON [{type, ref, detail}]
+  sourceType       String   // TASK | EVALUATION | EXPERIMENT | INCIDENT | MANUAL
+  sourceId         String?
+  agentKey         String?
+  workflow         String?
+  confidence       String   @default("low") // low | medium | high
+  status           String   @default("PROPOSED") // PROPOSED|APPROVED|REJECTED|DEPRECATED
+  supersededById   String?
+  createdBy        String
+  reviewedBy       String?
+  reviewNote       String   @default("")
+  createdAt        DateTime @default(now())
+  lastVerifiedAt   DateTime?
+  updatedAt        DateTime @updatedAt
+
+  @@index([companyId, status])
+}
+
+// Workspace routing policy overrides (JSON RoutingPolicy). One active row per workspace.
+model RoutingPolicyConfig {
+  id         String   @id @default(cuid())
+  companyId  String   @unique
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  policy     String   @default("{}")
+  updatedBy  String
+  updatedAt  DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Missions: a user objective turned into a versioned, dependency-aware plan,
+// executed task-by-task through the existing agent/tool/sandbox services.
+// See src/lib/missions/. All rows are workspace-scoped by companyId.
+// ---------------------------------------------------------------------------
+
+model Mission {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdById    String
+  title          String
+  objective      String
+  template       String?  // e.g. "checkout-fix"; null = generic planner
+  source         String   @default("USER") // USER | EXAMPLE | SEEDED (sample record, never executed)
+  status         String   @default("DRAFT") // see MISSION_STATUSES in src/lib/missions/state.ts
+  statusReason   String   @default("")
+  acceptance     String   @default("[]") // JSON string[] — mission-level success criteria
+  budgetUsd      Float    @default(1)
+  deadline       DateTime?
+  planVersion    Int      @default(0)
+  risk           String   @default("LOW") // LOW | MEDIUM | HIGH — drives which review steps the workflow includes
+  repairRounds   Int      @default(0) // bounded repair loop counter (QA failures + blocking review findings)
+  maxRepairs     Int      @default(2)
+  operatorHold   Boolean  @default(false) // paused by an operator (vs. PAUSED at an approval gate)
+  toolTimeouts   String   @default("{}") // JSON {tool: ms} — per-mission tool timeout overrides (tighter than the tool spec)
+  workspaceId    String?  // project (CodeWorkspace) the mission works on; base files come from its revision
+  baseRevision   Int?     // project revision snapshotted when the mission was created
+  baseFiles      String   @default("{}") // JSON path -> content of the files in scope at baseRevision
+  baseFileRevs   String   @default("{}") // JSON path -> per-file revision at baseRevision (for conflict detection)
+  costUsd        Float    @default(0) // estimated, from recorded agent runs
+  modelCalls     Int      @default(0)
+  toolCalls      Int      @default(0)
+  createdAt      DateTime @default(now())
+  startedAt      DateTime?
+  completedAt    DateTime?
+  plans          MissionPlan[]
+  tasks          MissionTask[]
+  artifacts      MissionArtifact[]
+  approvals      MissionApproval[]
+  runs           MissionTaskRun[]
+  handoffs       MissionHandoff[]
+  findings       MissionFinding[]
+  locks          MissionLock[]
+
+  @@index([companyId, status])
+  @@index([companyId, createdAt])
+}
+
+model MissionPlan {
+  id               String   @id @default(cuid())
+  missionId        String
+  mission          Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId        String
+  version          Int
+  summary          String
+  risks            String   @default("[]") // JSON string[]
+  estimatedCostUsd Float    @default(0)
+  estimatedMinutes Int      @default(0)
+  requiresApproval Boolean  @default(true)
+  status           String   @default("PROPOSED") // PROPOSED | APPROVED | REJECTED | SUPERSEDED
+  changeReason     String   @default("")
+  decidedBy        String?
+  decidedAt        DateTime?
+  createdAt        DateTime @default(now())
+
+  @@unique([missionId, version])
+}
+
+model MissionTask {
+  id             String   @id @default(cuid())
+  missionId      String
+  mission        Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId      String
+  planVersion    Int
+  key            String   // stable key within the plan, used by dependsOn
+  title          String
+  description    String
+  kind           String   // ANALYSIS | REPRODUCE | CODE_CHANGE | TEST | SECURITY_REVIEW | APPROVAL | REPORT
+  agentKey       String
+  assignmentReason String @default("") // why delegation chose this agent (capability match)
+  domain         String   @default("") // e.g. backend | frontend — matched against agent capability domains
+  files          String   @default("[]") // JSON write scope: the only paths code.write may touch for this task
+  budgetUsd      Float    @default(0.25) // per-task model budget (hard stop before each call)
+  tools          String   @default("[]") // JSON tool names this task will request
+  dependsOn      String   @default("[]") // JSON keys
+  acceptance     String   @default("[]") // JSON string[]
+  required       Boolean  @default(true)
+  status         String   @default("PENDING") // see TASK_STATUSES in src/lib/missions/state.ts
+  verification   String   @default("NONE") // NONE | PASSED | FAILED | UNVERIFIED
+  attempts       Int      @default(0)
+  maxAttempts    Int      @default(1)
+  leaseOwner     String?
+  leaseExpiresAt DateTime?
+  output         String   @default("") // concise operational summary
+  errorCategory  String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime @default(now())
+
+  @@unique([missionId, planVersion, key])
+  @@index([missionId, status])
+}
+
+model MissionArtifact {
+  id         String   @id @default(cuid())
+  missionId  String
+  mission    Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId  String
+  taskKey    String?
+  kind       String   // TEST_REPORT | DIFF | FILE | ANALYSIS | SECURITY_REPORT
+  name       String
+  version    Int      @default(1)
+  content    String
+  meta       String   @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([missionId, kind])
+}
+
+model MissionApproval {
+  id          String   @id @default(cuid())
+  missionId   String
+  mission     Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId   String
+  taskKey     String?
+  action      String   // what will happen on approval
+  reason      String
+  impact      String
+  risk        String   @default("MEDIUM")
+  onApprove   String   // consequence of approving
+  onReject    String   // consequence of rejecting
+  payloadHash String   // sha256 of the exact change; re-checked before executing
+  status      String   @default("PENDING") // PENDING | APPROVED | REJECTED | EXPIRED | CANCELLED
+  decidedBy   String?
+  decidedAt   DateTime?
+  note        String   @default("")
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([companyId, status])
+}
+
+// One execution attempt of a mission task: who ran it, with what context,
+// what it produced (validated), and what it cost. Survives retries/restarts.
+model MissionTaskRun {
+  id               String   @id @default(cuid())
+  missionId        String
+  mission          Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId        String
+  taskId           String
+  taskKey          String
+  attempt          Int
+  agentKey         String
+  worker           String
+  status           String   @default("RUNNING") // RUNNING | SUCCEEDED | FAILED | RETRYING | CANCELLED | ABANDONED
+  outcome          String   @default("") // e.g. passed | tests_failed | changes_requested | approved | approval_requested | reproduced
+  tier             String   @default("")
+  model            String   @default("")
+  mode             String   @default("none") // live | simulation | mixed | none (no model call)
+  routingReason    String   @default("")
+  modelCalls       Int      @default(0)
+  toolCalls        Int      @default(0)
+  retries          Int      @default(0) // in-execution retries (transient tool errors / invalid structured output)
+  tokensIn         Int      @default(0)
+  tokensOut        Int      @default(0)
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  usageEstimated   Boolean  @default(false) // true if any call's usage was estimated rather than provider-reported
+  costUsd          Float    @default(0)
+  latencyMs        Int      @default(0)
+  contextSources   String   @default("[]") // JSON provenance: [{id,kind,ref,tokens,required,included,truncated}]
+  contextTokens    Int      @default(0)
+  contextNotes     String   @default("[]") // JSON: omitted/truncated/missing notes
+  output           String   @default("{}") // JSON structured output (validated against the task-kind contract)
+  outputValid      Boolean  @default(false)
+  validationErrors String   @default("[]")
+  claims           String   @default("") // agent-authored narrative (a claim, not a verified fact)
+  errorCategory    String?
+  error            String   @default("")
+  agentRunIds      String   @default("[]")
+  toolLog          String   @default("[]") // JSON [{tool,status,durationMs,error?}] — includes deterministic steps with no AgentRun
+  startedAt        DateTime @default(now())
+  completedAt      DateTime?
+
+  @@index([missionId, taskKey])
+  @@index([companyId, agentKey])
+}
+
+// Structured, validated handoff from one task to its dependents.
+model MissionHandoff {
+  id         String   @id @default(cuid())
+  missionId  String
+  mission    Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId  String
+  planVersion Int
+  fromTaskKey String
+  fromAgent  String
+  toAgents   String   @default("[]") // JSON agent keys of dependent tasks
+  runId      String
+  payload    String   // JSON (HandoffSchema)
+  valid      Boolean
+  errors     String   @default("[]")
+  createdAt  DateTime @default(now())
+
+  @@index([missionId, fromTaskKey])
+}
+
+// Review/QA finding with evidence. Repairs must reference the finding they address.
+model MissionFinding {
+  id             String   @id @default(cuid())
+  missionId      String
+  mission        Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId      String
+  code           String   // F-1, F-2 … unique per mission
+  source         String   // reviewer | qa | security | system
+  taskKey        String   // task that raised it
+  runId          String
+  severity       String   // LOW | MEDIUM | HIGH | CRITICAL
+  blocking       Boolean
+  title          String
+  description    String
+  file           String   @default("")
+  evidence       String   @default("{}") // JSON {artifactId?, case?, codeHash?}
+  supported      Boolean  // evidence verified against persisted artifacts
+  recommendation String   @default("")
+  status         String   @default("OPEN") // OPEN | RESOLVED | UNSUPPORTED | UNRESOLVED
+  againstRunId     String? // the CODE_CHANGE run whose result this finding is about (attribution)
+  addressedByRunId String?
+  resolvedByRunId  String?
+  repairAttempts Int      @default(0)
+  createdAt      DateTime @default(now())
+  resolvedAt     DateTime?
+
+  @@unique([missionId, code])
+  @@index([missionId, status])
+}
+
+// Per-file write lock so two tasks never modify the same file concurrently.
+model MissionLock {
+  id        String   @id @default(cuid())
+  missionId String
+  mission   Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  companyId String
+  path      String
+  taskKey   String
+  owner     String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([missionId, path])
+}
+
+// ---------------------------------------------------------------------------
+// Operational intelligence (src/lib/ops). Findings are derived by versioned,
+// deterministic rules from persisted state; evidence points at real rows.
+// ---------------------------------------------------------------------------
+
+model OpsFinding {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  ruleId        String
+  ruleVersion   Int
+  dedupeKey     String   // ruleId + resource: one finding per (rule, resource)
+  category      String   // mission | agent | engineering | evaluation
+  certainty     String   // confirmed | warning | prediction | suspicion
+  severity      String   // low | medium | high | critical
+  severityReason String  @default("")
+  title         String
+  explanation   String
+  resourceType  String
+  resourceId    String
+  resourceLabel String   @default("")
+  missionId     String?
+  evidence      String   @default("[]") // JSON [{kind, id, label, detail}]
+  facts         String   @default("{}") // JSON: the measured values the rule used
+  status        String   @default("OPEN") // OPEN | ACKNOWLEDGED | INVESTIGATING | RESOLVED | DISMISSED
+  requiresHuman Boolean  @default(false)
+  nextAction    String   @default("")
+  occurrences   Int      @default(1)
+  firstDetectedAt DateTime @default(now())
+  lastObservedAt  DateTime @default(now())
+  acknowledgedBy String?
+  acknowledgedAt DateTime?
+  resolvedAt    DateTime?
+  resolvedBy    String?  // "rule" (criteria met) or a user email
+  resolution    String   @default("")
+  dismissedReason String @default("")
+  history       String   @default("[]") // JSON [{at, actor, change, detail}]
+  createdAt     DateTime @default(now())
+  actions       OpsAction[]
+
+  @@unique([companyId, dedupeKey])
+  @@index([companyId, status, severity])
+}
+
+model OpsAction {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  findingId   String?
+  finding     OpsFinding? @relation(fields: [findingId], references: [id], onDelete: SetNull)
+  actionType  String   // retry_task | pause_mission | cancel_mission | rerun_evaluation | rollback_deployment | ...
+  target      String   // JSON {type, id}
+  initiatedBy String   // user email or "monitor"
+  trigger     String   // user | automatic
+  policyLevel String   // the workspace operations policy at decision time
+  policyRule  String   // which policy clause allowed/blocked it
+  decision    String   // allowed | blocked | requires_approval
+  status      String   // blocked | running | succeeded | failed
+  result      String   @default("{}") // JSON: what the real service returned
+  error       String   @default("")
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([companyId, createdAt])
+}
+
+model OpsMonitor {
+  id              String   @id @default(cuid())
+  companyId       String   @unique
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  enabled         Boolean  @default(true)
+  intervalSec     Int      @default(300)
+  policyLevel     String   @default("RECOMMEND") // OBSERVE | RECOMMEND | BOUNDED | CONTINUOUS
+  allowedAutoActions String @default("[]") // JSON action types permitted automatically (BOUNDED/CONTINUOUS only)
+  maxAutoActionsPerHour Int @default(5)
+  thresholds      String   @default("{}") // JSON overrides for rule thresholds
+  notifyMinSeverity String @default("high")
+  aiSummaries     Boolean  @default(false)
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  lastRunAt       DateTime?
+  lastRunId       String?
+  updatedBy       String   @default("")
+  updatedAt       DateTime @updatedAt
+}
+
+model OpsEvaluation {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  trigger     String   // scheduled | event | manual
+  status      String   @default("RUNNING") // RUNNING | COMPLETED | FAILED | SKIPPED
+  rulesRun    Int      @default(0)
+  opened      Int      @default(0)
+  updated     Int      @default(0)
+  resolved    Int      @default(0)
+  reopened    Int      @default(0)
+  unknown     String   @default("[]") // JSON [{ruleId, resource, reason}] — evidence missing
+  autoActions Int      @default(0)
+  durationMs  Int      @default(0)
+  error       String   @default("")
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([companyId, startedAt])
+}
+
+model Notification {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  kind       String   // finding | approval | budget | intervention
+  severity   String
+  title      String
+  body       String   @default("")
+  href       String   @default("")
+  dedupeKey  String   // one notification per open condition
+  findingId  String?
+  readBy     String   @default("[]") // JSON user ids
+  createdAt  DateTime @default(now())
+
+  @@unique([companyId, dedupeKey])
+  @@index([companyId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Company digital twin (src/lib/twin). Operational state is DERIVED from real
+// rows (missions, agents, findings…) at read time; only the CEO configuration
+// and simulation runs are stored here.
+// ---------------------------------------------------------------------------
+
+model TwinConfig {
+  id          String   @id @default(cuid())
+  companyId   String   @unique
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  objectives  String   @default("[]") // JSON string[]
+  budgetUsd   Float    @default(100000) // simulated operating budget per period
+  allocation  String   @default("{}")   // JSON {feature, quality, reliability, security} fractions summing to 1
+  priorities  String   @default("[]")   // JSON ordered list of: ship_feature | fix_reliability | resolve_security | reduce_cost
+  capacity    String   @default("{}")   // JSON {department: simulated agent-slots}
+  riskPolicy  String   @default("balanced") // cautious | balanced | aggressive (SIMULATED approvals only)
+  version     Int      @default(1)
+  history     String   @default("[]")   // JSON [{version, at, by, change}]
+  updatedBy   String   @default("")
+  updatedAt   DateTime @updatedAt
+}
+
+// One immutable simulation run. Never references or mutates live missions.
+model TwinRun {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  scenario     String   // delivery_crunch | reliability_crisis | security_growth
+  kind         String   // baseline | what_if
+  baselineId   String?  // what-if runs point at the run they diverge from
+  label        String   @default("")
+  rulesVersion String
+  seed         Int
+  inputs       String   // JSON decisions applied (allocation, priorities, capacity, gates, riskPolicy)
+  initialState String   // JSON scenario state before the run
+  transitions  String   // JSON [{t, type, item?, dept?, detail}]
+  result       String   // JSON final state + metrics
+  inputHash    String   // sha256(scenario + rulesVersion + seed + inputs + initialState) — reproducibility key
+  resultHash   String   // sha256(result)
+  durationMs   Int      @default(0)
+  saved        Boolean  @default(false)
+  createdBy    String
+  createdAt    DateTime @default(now())
+
+  @@index([companyId, scenario, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Product factory (src/lib/factory). One persistent lifecycle per product:
+// brief revisions → backlog (epic/story/task) → design/architecture artifacts →
+// execution through Missions (real sandbox runs) → git commits → release
+// readiness → deployment requests. Every phase change is a LifecycleTransition
+// with actor, reason and evidence. Enum-like values are validated in code.
+// ---------------------------------------------------------------------------
+
+model Product {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title          String
+  idea           String
+  phase          String   @default("DISCOVERY") // see PHASES in src/lib/factory/lifecycle.ts
+  status         String   @default("ACTIVE")    // ACTIVE | PAUSED | CANCELLED
+  stack          String   @default("node-web") // builder stack template (src/lib/builder/stacks.ts)
+  qualityProfile String   @default("web-app") // delivery gate profile (src/lib/factory/gate.ts)
+  planningStatus String   @default("READY") // QUEUED | RUNNING | READY | FAILED (AI planning job)
+  planningError  String   @default("")
+  autonomy       String   @default("SUPERVISED") // SUGGEST | SUPERVISED | BOUNDED | CONTINUOUS
+  scopeApproved  Boolean  @default(false)
+  scopeApprovedBy String?
+  scopeApprovedAt DateTime?
+  limits         String   @default("{}") // JSON {maxRepairs, maxParallel, budgetUsd, maxAttempts}
+  template       String?  // executable fixture app backing this product's code tasks (null = none)
+  repoId         String?
+  version        Int      @default(1)    // optimistic concurrency for edits
+  tickLeaseUntil DateTime? // scheduler lease: one tick per product at a time
+  createdById    String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  briefs         ProductBrief[]
+  items          BacklogItem[]
+  artifacts      ProductArtifact[]
+  transitions    LifecycleTransition[]
+  approvals      ProductApproval[]
+
+  @@index([companyId, createdAt])
+}
+
+model ProductBrief {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  companyId String
+  version   Int
+  content   String   // JSON BriefSchema (src/lib/factory/brief.ts)
+  source    String   // model | template | user
+  author    String
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  @@unique([productId, version])
+}
+
+model BacklogItem {
+  id           String   @id @default(cuid())
+  productId    String
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  companyId    String
+  key          String   // stable id, e.g. E1, E1.S2, E1.S2.T1, E1.S2.T1.R1
+  level        String   // EPIC | STORY | TASK | REPAIR
+  kind         String   @default("") // DESIGN | ARCHITECTURE | FRONTEND | BACKEND | DATA | TEST | DOCS | INVESTIGATE
+  parentKey    String?
+  title        String
+  description  String   @default("")
+  acceptance   String   @default("[]") // JSON string[]
+  dependsOn    String   @default("[]") // JSON keys
+  effort       Int      @default(1)    // ESTIMATE in points (not measured time)
+  capabilities String   @default("[]") // JSON agent keys able to own it
+  files        String   @default("[]") // JSON known paths / interfaces
+  verifyBy     String   @default("[]") // JSON verification requirements
+  requirements String   @default("[]") // JSON brief requirement ids this item implements (FR-n / AC-n / NFR-n)
+  risk         String   @default("LOW")
+  priority     Int      @default(100)
+  milestone    String   @default("M1")
+  status       String   @default("TODO") // see ITEM_STATUSES
+  verification String   @default("NOT_RUN") // NOT_RUN | RUNNING | PASSED | FAILED | BLOCKED | INCONCLUSIVE
+  executable   Boolean  @default(false) // backed by a real codebase + test suite
+  missionId    String?  // legacy: execution via fixture Mission
+  buildId      String?  // current execution (Build) for TASK items
+  attempts     Int      @default(0) // dispatches (each is one Mission with its own bounded repair loop)
+  blockedReason String  @default("")
+  findingId    String?  // REPAIR items: the MissionFinding they address
+  evidence     String   @default("[]") // JSON [{kind, ref, detail}]
+  history      String   @default("[]") // JSON [{at, actor, change}]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([productId, key])
+  @@index([companyId, status])
+}
+
+model ProductArtifact {
+  id         String   @id @default(cuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  companyId  String
+  kind       String   // DESIGN | HANDOFF | ARCHITECTURE | RELEASE_CANDIDATE | DEPLOYMENT | DISAGREEMENT | CHANGE_SET | DELIVERY_REPORT
+  version    Int
+  title      String
+  content    String   // JSON (schema per kind)
+  status     String   @default("PROPOSED") // PROPOSED | APPROVED | REVISION_REQUESTED | SUPERSEDED
+  source     String   // model | template | user | engine
+  producedBy String   // agent key or user email
+  consumedBy String   @default("[]") // JSON backlog keys that reference it
+  feedback   String   @default("[]") // JSON [{at, by, text}]
+  createdAt  DateTime @default(now())
+
+  @@index([productId, kind])
+}
+
+model LifecycleTransition {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  companyId String
+  fromPhase String
+  toPhase   String
+  reason    String
+  actor     String
+  evidence  String   @default("[]") // JSON [{kind, ref, detail}]
+  createdAt DateTime @default(now())
+
+  @@index([productId, createdAt])
+}
+
+model ProductApproval {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  companyId   String
+  action      String   // scope | release_candidate | push | deploy_production | ...
+  actionClass String   // see ACTION_CLASSES in src/lib/factory/policy.ts
+  target      String
+  summary     String
+  risks       String   @default("[]")
+  evidence    String   @default("[]")
+  payloadHash String
+  status      String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+  decidedBy   String?
+  decidedAt   DateTime?
+  note        String   @default("")
+  createdAt   DateTime @default(now())
+
+  @@index([companyId, status])
+}
+
+model RepoConnection {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  provider      String   // local | github | gitlab
+  name          String   // local: repo label; github/gitlab: owner/repo or group/project
+  defaultBranch String   @default("main")
+  remoteUrl     String?
+  credentialEnv String?  // NAME of the server env var holding the token — never the token itself
+  webhookEnv    String?  // NAME of the env var holding the webhook secret
+  githubInstallationId String? // GithubInstallation.id when linked through the GitHub App
+  detected      String   @default("{}") // JSON {language, framework, packageManager, testCommand}
+  triggers      String   @default("{}") // JSON {push, pull_request, check_failed, review_comment}: off|report|propose|run
+  status        String   @default("CONNECTED") // CONNECTED | ERROR | DISCONNECTED
+  lastError     String?
+  createdAt     DateTime @default(now())
+  gitOps        GitOperation[]
+
+  @@unique([companyId, provider, name])
+}
+
+model GitOperation {
+  id        String   @id @default(cuid())
+  repoId    String
+  repo      RepoConnection @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  companyId String
+  productId String?
+  itemKey   String?
+  op        String   // init | branch | commit | push | pull_request | status | rollback
+  branch    String?
+  sha       String?
+  url       String?
+  status    String   // SUCCEEDED | FAILED | BLOCKED
+  detail    String   @default("")
+  idempotencyKey String?
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, idempotencyKey])
+  @@index([repoId, createdAt])
+}
+
+model WebhookDelivery {
+  id         String   @id @default(cuid())
+  provider   String
+  deliveryId String
+  companyId  String?
+  repoId     String?
+  event      String
+  action     String   // what AURA did: ignored | report | propose | run | rejected
+  detail     String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@unique([provider, deliveryId])
+}
+
+// ---------------------------------------------------------------------------
+// Durable background jobs (src/lib/jobs). Claimed with a lease by a worker
+// process; idempotent per (companyId, dedupeKey); retried with backoff only
+// for retryable failures; dead-lettered after maxAttempts.
+// ---------------------------------------------------------------------------
+model Job {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type        String   // see JOB_HANDLERS in src/lib/jobs/registry.ts
+  payload     String   @default("{}")
+  status      String   @default("QUEUED") // QUEUED | RUNNING | SUCCEEDED | FAILED | DEAD | CANCELLED
+  dedupeKey   String?
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(3)
+  runAt       DateTime @default(now())
+  leaseOwner  String?
+  leaseUntil  DateTime?
+  lastError   String   @default("")
+  errorKind   String?
+  result      String   @default("{}")
+  // V6 runtime (src/lib/runtime): scheduling, limits, checkpoints, provenance
+  priority    Int      @default(100) // lower runs first
+  dependsOn   String   @default("[]") // JSON job ids that must SUCCEED first
+  deadline    DateTime? // not started by then → FAILED (deadline_missed)
+  timeoutMs   Int?      // per-attempt wall-clock limit (cooperative abort + lease expiry)
+  concurrencyKey String? // at most N RUNNING jobs share a key (RuntimeSettings.maxConcurrentPerKey)
+  progress    String   @default("{}") // JSON {step, pct?, message, at}
+  checkpoint  String   @default("{}") // JSON last verified step state; handlers resume from it
+  goalId      String?
+  scheduleId  String?
+  workerId    String?  // Worker row of the current/last attempt
+  correlationId String
+  createdBy   String
+  createdAt   DateTime @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  @@unique([companyId, dedupeKey])
+  @@index([status, runAt])
+  @@index([status, priority, runAt])
+  @@index([goalId])
+}
+
+// ---------------------------------------------------------------------------
+// Builder (src/lib/builder): an AI engineering run against a real git
+// working tree. Every command the agents or the engine run is a CommandRun
+// with the exact command, exit code and bounded output.
+// ---------------------------------------------------------------------------
+model Build {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  itemKey     String
+  jobId       String?
+  status      String   @default("QUEUED") // QUEUED | RUNNING | VERIFIED | FAILED | BLOCKED | CANCELLED
+  phase       String   @default("queued") // queued | setup | implement | verify | review | repair | commit | done
+  branch      String
+  baseSha     String?
+  headSha     String?
+  attempt     Int      @default(0)
+  maxRepairs  Int      @default(2)
+  summary     String   @default("")
+  failure     String   @default("")
+  criteria    String   @default("[]") // JSON [{text, status: met|not_met|unverified, evidence}]
+  findings    String   @default("[]") // JSON [{source, severity, title, detail, evidence, blocking}]
+  changed     String   @default("[]") // JSON paths
+  tokensIn    Int      @default(0)
+  tokensOut   Int      @default(0)
+  costUsd     Float    @default(0)
+  modelCalls  Int      @default(0)
+  toolCalls   Int      @default(0)
+  sandboxMs   Int      @default(0)
+  budgetUsd   Float    @default(1)   // per-run model budget (product limits.budgetUsd); hard stop
+  stopReason  String   @default("") // why the run stopped early: repeated_failure | task_budget | ...
+  impact      String   @default("{}") // JSON change-impact analysis of the last attempt (src/lib/builder/intel.ts)
+  container   String?  // name of the sandbox container currently executing (cancellation kills it)
+  correlationId String
+  createdBy   String
+  createdAt   DateTime @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  commands    CommandRun[]
+
+  @@index([companyId, productId, createdAt])
+}
+
+model CommandRun {
+  id        String   @id @default(cuid())
+  buildId   String
+  build     Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  companyId String
+  purpose   String   // install | test | focused_test | lint | typecheck | build | check | agent | probe
+  actor     String   // agent key or "engine"
+  command   String
+  network   Boolean  @default(false)
+  exitCode  Int?
+  timedOut  Boolean  @default(false)
+  durationMs Int     @default(0)
+  output    String   @default("")
+  truncated Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([buildId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Billing and usage (src/lib/billing). Plans are defined in config
+// (src/lib/billing/plans.ts); the subscription is written ONLY by verified
+// Stripe webhooks (or the free default).
+// ---------------------------------------------------------------------------
+model Subscription {
+  id                 String   @id @default(cuid())
+  companyId          String   @unique
+  company            Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  plan               String   @default("free")
+  status             String   @default("active") // active | trialing | past_due | canceled | incomplete
+  stripeCustomerId   String?  @unique
+  stripeSubscriptionId String? @unique
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean  @default(false)
+  updatedAt          DateTime @updatedAt
+}
+
+model BillingEvent {
+  id        String   @id // Stripe event id (idempotency)
+  type      String
+  companyId String?
+  processed Boolean  @default(false)
+  detail    String   @default("")
+  createdAt DateTime @default(now())
+}
+
+model UsageEvent {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  metric    String   // ai_tokens_in | ai_tokens_out | ai_cost_usd | sandbox_ms | build | product
+  quantity  Float
+  source    String   // build:<id> | product:<id> | agent_run:<id>
+  createdAt DateTime @default(now())
+
+  @@index([companyId, metric, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// GitHub App installations (src/lib/integrations/github). Tokens are minted
+// per request from the App private key; nothing secret is stored here.
+// ---------------------------------------------------------------------------
+model GithubInstallation {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  installationId Int
+  account        String
+  connectedBy    String
+  status         String   @default("ACTIVE") // ACTIVE | REVOKED
+  createdAt      DateTime @default(now())
+
+  @@unique([companyId, installationId])
+}
+
+// Transactional email outbox (src/lib/email). Delivered by the configured
+// provider; without one, rows stay PENDING and the UI says email is not configured.
+model EmailMessage {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  body      String
+  status    String   @default("PENDING") // PENDING | SENT | FAILED
+  error     String   @default("")
+  createdAt DateTime @default(now())
+  sentAt    DateTime?
+}
+
+// ---------------------------------------------------------------------------
+// Engineering memory, defects and codebase intelligence (AURA V3)
+// ---------------------------------------------------------------------------
+
+// A failure observed in an engine-run check, tracked across repair attempts (src/lib/builder/debug.ts).
+model Defect {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  itemKey     String
+  buildId     String
+  signature   String   // stable hash of the normalised failure (failing tests / first error lines)
+  category    String   // code | test_assumption | dependency | configuration | infrastructure | permissions | timeout | unknown
+  title       String
+  command     String
+  exitCode    Int?
+  commandRunId String  // the CommandRun whose output shows the failure
+  failingTests String  @default("[]") // JSON names
+  files       String   @default("[]") // JSON implicated files (stack traces + test imports)
+  diagnosis   String   @default("")
+  status      String   @default("OPEN") // OPEN | FIXED | RECURRING | ABANDONED
+  occurrences Int      @default(1)
+  firstAttempt Int     @default(0)
+  lastAttempt Int      @default(0)
+  fixedByCommandRunId String? // passing CommandRun that verified the fix
+  fixedSha    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([buildId, signature])
+  @@index([companyId, productId, status])
+}
+
+// Project-scoped engineering memory with provenance. VERIFIED facts come from
+// executed evidence or explicit human approval; ASSUMPTION is labelled as such;
+// STALE / INVALIDATED entries are never injected as facts.
+model ProjectMemory {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  key         String   // stable identity (idempotent upserts), e.g. "api:POST /api/x"
+  kind        String   // convention | decision | api_contract | dependency | defect_solution | test_setup | limitation | approved_decision | pattern
+  content     String
+  status      String   @default("ASSUMPTION") // VERIFIED | ASSUMPTION | STALE | INVALIDATED
+  files       String   @default("[]") // JSON paths the memory is about (staleness)
+  requirements String  @default("[]") // JSON requirement ids it relates to (staleness)
+  sourceSha   String?
+  provenance  String   @default("{}") // JSON {type: build|brief|approval|user, ref, detail}
+  staleReason String   @default("")
+  uses        Int      @default(0)
+  verifiedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([productId, key])
+  @@index([companyId, productId, status])
+}
+
+// Static index of one repository snapshot (src/lib/builder/intel.ts). One row per (repo, commit).
+model CodeIndex {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  repoId    String
+  sha       String
+  data      String   // JSON CodeIndexData
+  files     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([repoId, sha])
+  @@index([companyId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Engineering lab (AURA V5): benchmarks of AURA's own pipeline, experiments
+// on AURA's own engineering methods, and the persisted improvement loop.
+// src/lib/lab/*
+// ---------------------------------------------------------------------------
+
+// One execution of a benchmark suite (or subset) under one configuration.
+model LabRun {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  suiteVersion String   // benchmark suite version (src/lib/lab/benchmarks.ts)
+  split        String   // train | heldout | all
+  configKey    String   // which pipeline configuration was evaluated (src/lib/lab/config.ts)
+  config       String   @default("{}") // JSON resolved configuration
+  codeVersion  String   @default("") // git sha / content hash of the AURA code under test
+  executor     String   // docker | host-trusted (see src/lib/lab/executor.ts)
+  experimentId String?
+  label        String   @default("") // baseline | candidate | adhoc | regression
+  status       String   @default("RUNNING") // RUNNING | COMPLETED | FAILED | CANCELLED | INTERRUPTED
+  total        Int      @default(0)
+  passed       Int      @default(0)
+  failed       Int      @default(0)
+  errored      Int      @default(0)
+  skipped      Int      @default(0)
+  metrics      String   @default("{}") // JSON scorecard (src/lib/lab/scorecard.ts)
+  durationMs   Int      @default(0)
+  sandboxMs    Int      @default(0)
+  modelCalls   Int      @default(0) // the lab runs no model calls today; recorded so it is never assumed
+  costUsd      Float    @default(0)
+  error        String   @default("")
+  createdBy    String
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+  cases        LabCaseResult[]
+
+  @@index([companyId, startedAt])
+  @@index([experimentId])
+}
+
+model LabCaseResult {
+  id          String   @id @default(cuid())
+  runId       String
+  run         LabRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  benchmarkId String
+  benchmarkVersion String
+  category    String
+  split       String
+  fixtureHash String   // hash of the fixture files (reproducibility)
+  status      String   // PASSED | FAILED | ERROR | SKIPPED
+  criteria    String   @default("[]") // JSON [{id, text, passed, evidence}]
+  measures    String   @default("{}") // JSON per-dimension measurements
+  commands    String   @default("[]") // JSON [{command, exitCode, durationMs, outputTail}]
+  error       String   @default("")
+  durationMs  Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([runId])
+  @@index([benchmarkId, createdAt])
+}
+
+// An experiment on AURA's own engineering method: hypothesis, criteria, arms, decision.
+model LabExperiment {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key          String   // stable approach id (rejected approaches are not re-run blindly)
+  title        String
+  problem      String
+  evidence     String   @default("[]") // JSON [{kind, ref, detail}] supporting the problem
+  hypothesis   String
+  successCriteria String @default("[]") // JSON [{metric, op, value, split}]
+  regressionCriteria String @default("[]") // JSON [{metric, op, value, split}]
+  procedure    String   @default("")
+  rejectIf     String   @default("")
+  baselineConfig String
+  candidateConfig String
+  codeChange   String   @default("") // description + commit of a code-level change, when there is one
+  status       String   @default("PROPOSED") // PROPOSED | RUNNING | ACCEPTED | REJECTED | INCONCLUSIVE | AWAITING_APPROVAL | CANCELLED | INTERRUPTED
+  baselineRunIds String @default("[]")
+  candidateRunIds String @default("[]")
+  decision     String   @default("{}") // JSON {outcome, reasons[], comparison}
+  costLimitMs  Int      @default(600000) // sandbox/wall budget for the experiment
+  createdBy    String
+  decidedBy    String?
+  createdAt    DateTime @default(now())
+  finishedAt   DateTime?
+
+  @@index([companyId, createdAt])
+  @@index([companyId, key])
+}
+
+// The improvement loop's durable state (one row per workspace).
+model LabState {
+  companyId   String   @id
+  objective   String   @default("")
+  status      String   @default("IDLE") // IDLE | RUNNING | PAUSED | BLOCKED
+  activeExperimentId String?
+  activeConfig String   @default("default")
+  backlog     String   @default("[]") // JSON improvement proposals with evidence
+  blockers    String   @default("[]") // JSON strings
+  regressions String   @default("[]") // JSON known regressions
+  nextAction  String   @default("")
+  resume      String   @default("") // human-readable resume instructions
+  lastVerifiedAt DateTime?
+  version     Int      @default(1)
+  updatedAt   DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous runtime (AURA V6): workers, schedules, goals, settings, breakers,
+// durable job log. src/lib/runtime/*
+// ---------------------------------------------------------------------------
+
+// A worker process (inline in the web server, or `npm run worker`). Liveness = heartbeatAt.
+model Worker {
+  id          String   @id // stable per process: w-<host>-<pid>-<rand>
+  host        String
+  pid         Int
+  mode        String   // inline | standalone
+  version     String   @default("")
+  status      String   @default("RUNNING") // RUNNING | DRAINING | STOPPED
+  concurrency Int      @default(1)
+  running     String   @default("[]") // JSON job ids currently executing
+  processed   Int      @default(0)
+  failed      Int      @default(0)
+  startedAt   DateTime @default(now())
+  heartbeatAt DateTime @default(now())
+  stoppedAt   DateTime?
+
+  @@index([heartbeatAt])
+}
+
+// Durable, append-only job history (state transitions, progress, checkpoints, recoveries).
+model JobEvent {
+  id        String   @id @default(cuid())
+  jobId     String
+  companyId String
+  type      String   // enqueued | claimed | progress | checkpoint | succeeded | failed | retry_scheduled | dead | cancelled | lease_reclaimed | timeout | deadline_missed | blocked_by_breaker | resumed
+  workerId  String?
+  attempt   Int      @default(0)
+  detail    String   @default("")
+  data      String   @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([jobId, createdAt])
+  @@index([companyId, type, createdAt])
+}
+
+// Recurring or deferred work. The scheduler (lease-protected) enqueues a job per due slot.
+model Schedule {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name       String
+  jobType    String
+  payload    String   @default("{}")
+  spec       String   // "every 30m" | cron "m h dom mon dow" (UTC) | "once <ISO>"
+  enabled    Boolean  @default(true)
+  nextRunAt  DateTime?
+  lastRunAt  DateTime?
+  lastJobId  String?
+  leaseUntil DateTime?
+  runs       Int      @default(0)
+  createdBy  String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([enabled, nextRunAt])
+  @@index([companyId])
+}
+
+// A user goal executed autonomously by the goal engine (src/lib/runtime/goals.ts).
+model Goal {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  kind        String   // build_product | add_feature | improve_aura | continue_product
+  title       String
+  request     String   // the user's words (untrusted input; never instructions to the runtime)
+  mode        String   @default("SUPERVISED") // SUPERVISED | AUTONOMOUS_DEV | CONTINUOUS_IMPROVEMENT | PRODUCTION_OPS
+  status      String   @default("QUEUED") // QUEUED | RUNNING | WAITING | BLOCKED | PAUSED | COMPLETED | FAILED | CANCELLED | BUDGET_EXHAUSTED
+  statusReason String  @default("")
+  productId   String?
+  acceptance  String   @default("[]") // JSON [{id, text, status: met|not_met|unverified, evidence}]
+  plan        String   @default("[]") // JSON steps [{key, title, status, evidence, at}]
+  checkpoint  String   @default("{}") // JSON last verified step
+  limits      String   @default("{}") // JSON GoalLimits
+  usage       String   @default("{}") // JSON {advances, modelCalls, tokensIn, tokensOut, costUsd, costSource, wallMs}
+  currentJobId String?
+  nextCheckAt DateTime?
+  createdBy   String   // user id
+  createdByEmail String @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  finishedAt  DateTime?
+
+  @@index([companyId, status])
+}
+
+// Runtime policy per workspace ("*" = global defaults / global kill switch). Enforced by the queue + goal engine.
+model RuntimeSettings {
+  companyId   String   @id
+  autonomyEnabled Boolean @default(true) // kill switch: false → no job of this workspace is claimed
+  limits      String   @default("{}") // JSON RuntimeLimits
+  approvals   String   @default("{}") // JSON overrides of the approval policy per action class
+  version     Int      @default(1)
+  updatedBy   String   @default("")
+  updatedAt   DateTime @updatedAt
+}
+
+// Circuit breaker per scope (e.g. "job:build.run", "provider:anthropic", "budget:cost").
+model CircuitBreaker {
+  id          String   @id @default(cuid())
+  companyId   String
+  scope       String
+  state       String   @default("CLOSED") // CLOSED | OPEN | HALF_OPEN
+  failures    Int      @default(0) // consecutive
+  openedAt    DateTime?
+  reopenAt    DateTime?
+  reason      String   @default("")
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, scope])
+}
+
+// One self-modification attempt (src/lib/runtime/selfmod.ts): source revision, patch hash, test evidence,
+// decision and rollback info. Re-submitting the same patch on the same base is refused (no repeated failures).
+model SelfModAttempt {
+  id         String   @id @default(cuid())
+  companyId  String
+  key        String   // experiment id (branch suffix)
+  patchHash  String
+  baseSha    String   @default("")
+  files      String   @default("[]") // JSON paths
+  status     String   // COMMITTED | REVERTED | REFUSED | UNAVAILABLE
+  branch     String?
+  commit     String?
+  tests      String   @default("{}") // JSON {command, exitCode, outputTail}
+  reasons    String   @default("[]")
+  rollback   String   @default("") // how the change was undone, or how to undo it
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([patchHash])
+}
+
+// ---------------------------------------------------------------------------
+// Product delivery (AURA V7): deployment targets, deployments, change requests.
+// src/lib/deploy/*, src/lib/factory/change.ts
+// ---------------------------------------------------------------------------
+
+// A configured place a product can be deployed to (one per product + environment).
+model DeployTarget {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId    String
+  env          String   // preview | production
+  provider     String   // docker-host (see src/lib/deploy/providers.ts)
+  config       String   @default("{}") // JSON provider config (no secrets): {port, bindAddress, publicHost, healthPath, env:{NAME:"value"}}
+  secretEnvNames String @default("[]") // JSON names of SERVER env vars whose values are injected (values never stored)
+  autoDeploy   Boolean  @default(false) // preview only: deploy approved releases without asking (policy permitting)
+  status       String   @default("UNVERIFIED") // UNVERIFIED | CONNECTED | ERROR
+  statusDetail String   @default("")
+  verifiedAt   DateTime?
+  createdBy    String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([productId, env])
+  @@index([companyId])
+}
+
+// One deployment attempt. SUCCEEDED/VERIFIED only from provider confirmation + AURA's own health checks.
+model ProductDeployment {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId    String
+  targetId     String
+  env          String
+  provider     String
+  ref          String   // branch deployed
+  sha          String   // commit deployed
+  releaseVersion Int?
+  status       String   @default("QUEUED") // QUEUED | PREFLIGHT | BUILDING | STARTING | VERIFYING | VERIFIED | FAILED | ROLLED_BACK | SUPERSEDED | CANCELLED
+  preflight    String   @default("[]") // JSON [{id,label,status,detail}]
+  providerRef  String   @default("{}") // JSON provider-returned identifiers {image, container, ...}
+  url          String?
+  health       String   @default("[]") // JSON [{path, status, ms, ok, detail}]
+  targetConfig String   @default("{}") // JSON snapshot of the target config this deployment was built/verified with
+  logs         String   @default("") // provider + AURA log (bounded)
+  failure      String   @default("")
+  previousId   String?  // deployment that was live before this one (rollback target)
+  rolledBackTo String?
+  approvalId   String?
+  jobId        String?
+  requestedBy  String
+  createdAt    DateTime @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  @@index([companyId, productId, createdAt])
+  @@index([targetId, status])
+}

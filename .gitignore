@@ -1,0 +1,21 @@
+node_modules
+.next
+out
+dist
+.env
+.env.local
+*.log
+.DS_Store
+prisma/*.db
+prisma/*.db-journal
+prisma/dev.db*
+coverage
+.vercel
+next-env.d.ts
+e2e/.auth
+
+# local scratch / build artefacts
+tmp/
+test-results/
+playwright-report/
+*.tsbuildinfo

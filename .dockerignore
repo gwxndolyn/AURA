@@ -1,0 +1,11 @@
+node_modules
+.next
+tmp
+test-results
+e2e/screenshots
+prisma/*.db
+prisma/*.db-journal
+.env
+.env.*
+.git
+.claude

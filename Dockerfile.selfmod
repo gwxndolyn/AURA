@@ -1,0 +1,13 @@
+# Self-modification test image (src/lib/runtime/selfmod.ts): AURA's dependencies + Prisma client, no app
+# code baked in — the isolated worktree is mounted read-only at /wt and copied in per run.
+#   docker build -f Dockerfile.selfmod -t aura-selfmod:dev .
+# On networks with TLS interception, pass the corporate CA as a BuildKit secret (not stored in the image):
+#   docker build -f Dockerfile.selfmod --secret id=ca,src=/path/to/ca.pem -t aura-selfmod:dev .
+FROM node:20-bookworm
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=secret,id=ca,required=false sh -c 'if [ -s /run/secrets/ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/ca; fi; npm ci --ignore-scripts --no-audit --no-fund'
+COPY prisma ./prisma
+RUN --mount=type=secret,id=ca,required=false sh -c 'if [ -s /run/secrets/ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/ca; fi; npx prisma generate'
+RUN chown -R node:node /app
+USER node

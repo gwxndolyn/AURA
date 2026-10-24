@@ -1,0 +1,235 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * AURA design system — base layer + component classes.
+ * Colors come from src/lib/theme.ts via Tailwind; never hardcode hex here.
+ */
+
+:root {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* {
+  border-color: theme("colors.border.DEFAULT");
+}
+
+html {
+  /* Keep 16px root so rem-based spacing stays standard; body text is 13px. */
+  background: theme("colors.bg.DEFAULT");
+}
+body {
+  background: theme("colors.bg.DEFAULT");
+  color: theme("colors.text.DEFAULT");
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 19px;
+  font-feature-settings: "cv11", "ss01", "tnum";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: theme("colors.brand.DEFAULT / 0.28");
+}
+
+/* One focus treatment everywhere; keyboard-only. */
+:focus-visible {
+  outline: 2px solid theme("colors.brand.DEFAULT");
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: theme("colors.border.strong");
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: theme("colors.text.faint");
+}
+
+@layer components {
+  /* ---- Surfaces ---------------------------------------------------------- */
+  /* Bordered region. Use sparingly — prefer dividers + spacing inside pages. */
+  .card {
+    @apply rounded-lg border border-border bg-bg-raised;
+  }
+  .card-hover {
+    @apply transition-colors hover:border-border-strong hover:bg-bg-hover;
+  }
+  /* Recessed well for code, logs, raw output. */
+  .well {
+    @apply rounded-md border border-border-subtle bg-bg-inset;
+  }
+
+  /* ---- Page structure ---------------------------------------------------- */
+  .page {
+    @apply mx-auto w-full max-w-[1440px] px-4 py-5 md:px-6;
+  }
+  .page-header {
+    @apply mb-5 flex flex-col gap-3 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between;
+  }
+  .page-title {
+    @apply text-xl font-semibold tracking-[-0.01em] text-text;
+  }
+  .page-desc {
+    @apply mt-1 max-w-2xl text-sm text-text-muted;
+  }
+  .section-title {
+    @apply flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.06em] text-text-muted;
+  }
+
+  /* ---- Typography helpers ----------------------------------------------- */
+  .mono {
+    font-family: var(--font-mono);
+    font-feature-settings: "zero", "tnum";
+  }
+  .metric-label {
+    @apply text-2xs font-medium uppercase tracking-[0.07em] text-text-faint;
+  }
+  .kbd {
+    @apply mono inline-flex h-[18px] min-w-[18px] items-center justify-center rounded border border-border-strong bg-bg-elevated px-1 text-2xs text-text-muted;
+  }
+
+  /* ---- Buttons ----------------------------------------------------------- */
+  .btn {
+    @apply inline-flex h-8 select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium transition-[background-color,border-color,color,transform] duration-100 active:translate-y-px disabled:pointer-events-none disabled:opacity-45;
+  }
+  .btn-sm {
+    @apply h-7 px-2.5 text-xs;
+  }
+  /* One primary action per view. */
+  .btn-primary {
+    @apply btn bg-brand text-brand-ink hover:bg-brand-glow disabled:bg-bg-hover disabled:text-text-faint disabled:opacity-100;
+  }
+  .btn-secondary {
+    @apply btn border border-border-strong bg-bg-elevated text-text hover:border-text-faint hover:bg-bg-hover;
+  }
+  .btn-ghost {
+    @apply btn text-text-muted hover:bg-bg-hover hover:text-text;
+  }
+  .btn-danger {
+    @apply btn border border-danger/40 bg-danger/10 text-danger hover:border-danger/70 hover:bg-danger/15;
+  }
+  .icon-btn {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-hover hover:text-text disabled:opacity-40;
+  }
+
+  /* ---- Badges / chips ---------------------------------------------------- */
+  .chip {
+    @apply mono inline-flex h-5 items-center gap-1 whitespace-nowrap rounded px-1.5 text-2xs font-medium;
+  }
+
+  /* ---- Forms ------------------------------------------------------------- */
+  .input {
+    @apply h-8 w-full rounded-md border border-border-strong bg-bg-inset px-2.5 text-sm text-text placeholder:text-text-faint transition-colors hover:border-text-faint focus:border-brand focus:outline-none;
+  }
+  textarea.input {
+    @apply h-auto py-2;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium text-text-muted;
+  }
+
+  /* ---- Tabs (underline) -------------------------------------------------- */
+  .tabs {
+    @apply flex gap-4 overflow-x-auto border-b border-border;
+  }
+  .tab {
+    @apply -mb-px flex shrink-0 items-center gap-1.5 border-b-2 border-transparent pb-2 pt-1 text-sm text-text-muted transition-colors hover:text-text;
+  }
+  .tab[data-active="true"] {
+    @apply border-brand text-text;
+  }
+
+  /* ---- Segmented control ------------------------------------------------- */
+  .segmented {
+    @apply inline-flex rounded-md border border-border bg-bg-inset p-0.5;
+  }
+  .segmented > button {
+    @apply mono h-6 rounded px-2 text-2xs text-text-faint transition-colors hover:text-text;
+  }
+  .segmented > button[data-active="true"] {
+    @apply bg-bg-hover text-text;
+  }
+
+  /* ---- Data tables ------------------------------------------------------- */
+  .table {
+    @apply w-full border-collapse text-sm;
+  }
+  .table th {
+    @apply h-8 whitespace-nowrap border-b border-border px-3 text-left text-2xs font-medium uppercase tracking-[0.06em] text-text-faint;
+  }
+  .table td {
+    @apply h-10 border-b border-border-subtle px-3 align-middle;
+  }
+  .table tbody tr {
+    @apply transition-colors;
+  }
+  .table tbody tr[data-interactive="true"] {
+    @apply cursor-pointer hover:bg-bg-hover;
+  }
+  .table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+
+  /* ---- Status dot -------------------------------------------------------- */
+  .dot {
+    @apply inline-block h-1.5 w-1.5 shrink-0 rounded-full;
+  }
+}
+
+/* Legacy utilities kept as solid surfaces (no blur, no decorative grid). */
+.glass {
+  background: theme("colors.bg.raised");
+}
+.grid-bg {
+  background: none;
+}
+
+.skeleton {
+  @apply relative overflow-hidden rounded bg-bg-elevated;
+}
+.skeleton::after {
+  content: "";
+  @apply absolute inset-0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.035), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+/* React Flow: match the design system. */
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__handle {
+  background: theme("colors.border.strong") !important;
+  border: none !important;
+  width: 5px !important;
+  height: 5px !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
