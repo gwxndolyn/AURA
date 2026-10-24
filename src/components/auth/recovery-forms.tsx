@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
@@ -65,10 +65,10 @@ function Reset() {
     router.push("/login?reset=1");
   }
   return (
-    <Shell title="Choose a new password" desc="At least 8 characters.">
+    <Shell title="Choose a new password" desc="At least 10 characters.">
       {!token ? <p className="mt-6 text-sm text-danger">This link is missing its token. Request a new one.</p> : (
         <form onSubmit={submit} className="mt-6 space-y-3">
-          <div><label htmlFor="password" className="label">New password</label><input id="password" type="password" minLength={8} className="input" required value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" /></div>
+          <div><label htmlFor="password" className="label">New password</label><input id="password" type="password" minLength={10} className="input" required value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" /></div>
           {error && <p role="alert" className="rounded-md border border-danger/30 bg-danger/5 px-2.5 py-1.5 text-xs text-danger">{error}</p>}
           <button className="btn-primary w-full" disabled={busy}>{busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Set password</button>
         </form>
@@ -79,4 +79,71 @@ function Reset() {
 
 export function ResetPasswordForm() {
   return <Suspense fallback={<main className="min-h-screen" />}><Reset /></Suspense>;
+}
+
+function VerifyEmail() {
+  const token = useSearchParams().get("token") ?? "";
+  const [state, setState] = useState<{ busy: boolean; ok?: boolean; error?: string }>({ busy: false });
+  async function confirm() {
+    setState({ busy: true });
+    const r = await fetch("/api/auth/verify-email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }) }).then((x) => x.json()).catch(() => ({ ok: false, error: "Network error" }));
+    setState(r.ok ? { busy: false, ok: true } : { busy: false, error: r.error ?? "Verification failed" });
+  }
+  return (
+    <Shell title="Confirm your email" desc="Confirming your address lets you recover your account and receive invitations.">
+      {!token ? <p className="mt-6 text-sm text-danger">This link is missing its token. Request a new one from Settings → Account.</p> : state.ok ? (
+        <div className="mt-6 space-y-3 text-sm" role="status" data-testid="email-verified"><p className="text-success">Your email address is confirmed.</p><Link href="/app" className="btn-primary w-full">Continue to AURA</Link></div>
+      ) : (
+        <div className="mt-6 space-y-3">
+          {state.error && <p role="alert" className="rounded-md border border-danger/30 bg-danger/5 px-2.5 py-1.5 text-xs text-danger">{state.error}</p>}
+          <button onClick={confirm} className="btn-primary w-full" disabled={state.busy} data-testid="verify-email">{state.busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Confirm email address</button>
+        </div>
+      )}
+    </Shell>
+  );
+}
+
+export function VerifyEmailForm() {
+  return <Suspense fallback={<main className="min-h-screen" />}><VerifyEmail /></Suspense>;
+}
+
+function Invite() {
+  const token = useSearchParams().get("token") ?? "";
+  const router = useRouter();
+  const [info, setInfo] = useState<{ workspace: string; role: string; email: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [signedIn, setSignedIn] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!token) return;
+    void fetch(`/api/invitations?token=${encodeURIComponent(token)}`).then((x) => x.json()).then((r) => (r.ok ? setInfo(r.data) : setError(r.error))).catch(() => setError("Network error"));
+    void fetch("/api/auth/me").then((x) => x.json()).then((r) => setSignedIn(r.data?.user?.email ?? null)).catch(() => setSignedIn(null));
+  }, [token]);
+  async function accept() {
+    setBusy(true);
+    const r = await fetch("/api/invitations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }) }).then((x) => x.json());
+    setBusy(false);
+    if (!r.ok) return setError(r.error);
+    router.push(`/app/${r.data.companyId}`);
+  }
+  const next = encodeURIComponent(`/invite?token=${token}`);
+  return (
+    <Shell title={info ? `Join ${info.workspace}` : "Workspace invitation"} desc={info ? `You've been invited as ${info.role.toLowerCase()}. The invitation is for ${info.email}.` : "Checking your invitation…"}>
+      {!token && <p className="mt-6 text-sm text-danger">This link is missing its token.</p>}
+      {error && <p role="alert" className="mt-6 rounded-md border border-danger/30 bg-danger/5 px-2.5 py-1.5 text-xs text-danger">{error}</p>}
+      {info && signedIn === null && (
+        <div className="mt-6 space-y-2 text-sm"><p>Sign in or create an account with <strong>{info.email}</strong> to accept.</p><div className="flex gap-2"><Link href={`/login?next=${next}`} className="btn-primary flex-1">Sign in</Link><Link href={`/register?next=${next}&email=${encodeURIComponent(info.email)}`} className="btn-secondary flex-1">Create account</Link></div></div>
+      )}
+      {info && signedIn && (
+        <div className="mt-6 space-y-2 text-sm">
+          {signedIn.toLowerCase() !== info.email.toLowerCase() && <p className="text-xs text-warning">You are signed in as {signedIn}. This invitation is for {info.email} — sign out and sign in with that address.</p>}
+          <button onClick={accept} disabled={busy || signedIn.toLowerCase() !== info.email.toLowerCase()} className="btn-primary w-full" data-testid="accept-invite">{busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Accept invitation</button>
+        </div>
+      )}
+    </Shell>
+  );
+}
+
+export function InviteForm() {
+  return <Suspense fallback={<main className="min-h-screen" />}><Invite /></Suspense>;
 }

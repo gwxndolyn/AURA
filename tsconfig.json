@@ -33,8 +33,9 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     "/tmp/aura-next-e2e/types/**/*.ts",
+    "/tmp/claude/aura-ui-next/types/**/*.ts",
     "next-env.d.ts",
-    "/tmp/claude/aura-ui-next/types/**/*.ts"
+    "/tmp/aura-next-v8/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

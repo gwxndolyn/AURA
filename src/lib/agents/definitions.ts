@@ -1,4 +1,5 @@
 import type { ModelTier } from "@/lib/types";
+import { libraryPrompt } from "./prompts";
 
 export interface AgentDef {
   key: string;
@@ -186,6 +187,12 @@ export const AGENT_DEFS: AgentDef[] = [
       "You are Echo, a Customer Support agent. You resolve customer issues empathetically and route product feedback to the team.",
   },
 ];
+
+// Engineering-team agents use the operational prompt library (src/lib/agents/prompts.ts); the
+// one-line prompts above remain for the simulation-lab-only roles (ceo, red/blue team, analyst, support).
+for (const a of AGENT_DEFS) a.systemPrompt = libraryPrompt(a.key) ?? a.systemPrompt;
+// Distinct display names: QA and the code reviewer were both "Iris".
+for (const a of AGENT_DEFS) if (a.key === "reviewer") a.name = "Rhea";
 
 export const AGENT_BY_KEY: Record<string, AgentDef> = Object.fromEntries(
   AGENT_DEFS.map((a) => [a.key, a]),

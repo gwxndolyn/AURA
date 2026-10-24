@@ -8,7 +8,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { ApiError } from "@/lib/api";
-import { PLANS, type PlanId } from "./plans";
+import { PLANS, priceEnvFor, type PlanId, type BillingInterval } from "./plans";
 
 const API = () => process.env.STRIPE_API_BASE || "https://api.stripe.com";
 
@@ -17,20 +17,25 @@ export function billingConfigured() {
   if (!process.env.STRIPE_SECRET_KEY) missing.push("STRIPE_SECRET_KEY");
   if (!process.env.STRIPE_WEBHOOK_SECRET) missing.push("STRIPE_WEBHOOK_SECRET");
   for (const p of Object.values(PLANS)) if (p.stripePriceEnv && !process.env[p.stripePriceEnv]) missing.push(p.stripePriceEnv);
-  return { configured: missing.length === 0, missing, testMode: (process.env.STRIPE_SECRET_KEY ?? "").startsWith("sk_test_") };
+  // Annual prices are optional: a plan without one is simply offered monthly only.
+  const annual = Object.values(PLANS).filter((p) => p.stripePriceEnvYear && process.env[p.stripePriceEnvYear]).map((p) => p.id);
+  return { configured: missing.length === 0, missing, annual, testMode: (process.env.STRIPE_SECRET_KEY ?? "").startsWith("sk_test_"), live: (process.env.STRIPE_SECRET_KEY ?? "").startsWith("sk_live_") };
 }
 
 function form(obj: Record<string, string | number | undefined>, prefix = ""): string[] {
   return Object.entries(obj).filter(([, v]) => v !== undefined).map(([k, v]) => `${encodeURIComponent(prefix ? `${prefix}[${k}]` : k)}=${encodeURIComponent(String(v))}`);
 }
 
-async function stripe<T>(path: string, body: string[], idempotencyKey?: string): Promise<T> {
+async function stripe<T>(path: string, body: string[] | null, idempotencyKey?: string): Promise<T> {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new ApiError("Billing is not configured on this server (STRIPE_SECRET_KEY)", 503);
   const r = await fetch(`${API()}${path}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/x-www-form-urlencoded", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
-    body: body.join("&"),
+    method: body === null ? "GET" : "POST",
+    headers: { Authorization: `Bearer ${key}`, ...(body === null ? {} : { "Content-Type": "application/x-www-form-urlencoded" }), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+    body: body === null ? undefined : body.join("&"),
+    signal: AbortSignal.timeout(20_000),
+  }).catch((e) => {
+    throw new ApiError(`Payment provider unreachable: ${(e as Error).message}`, 502);
   });
   const json = (await r.json().catch(() => ({}))) as T & { error?: { message?: string } };
   if (!r.ok) throw new ApiError(`Payment provider error: ${json.error?.message ?? r.status}`, r.status >= 500 ? 502 : 400);
@@ -41,16 +46,51 @@ export async function createCustomer(args: { email: string; companyId: string })
   return stripe<{ id: string }>("/v1/customers", [...form({ email: args.email }), ...form({ companyId: args.companyId }, "metadata")], `cust-${args.companyId}`);
 }
 
-export async function createCheckoutSession(args: { customer: string; plan: PlanId; companyId: string; successUrl: string; cancelUrl: string }) {
-  const priceEnv = PLANS[args.plan].stripePriceEnv;
-  const price = priceEnv ? process.env[priceEnv] : undefined;
-  if (!price) throw new ApiError(`The ${PLANS[args.plan].name} plan is not configured for checkout (${priceEnv})`, 503);
+export function priceIdFor(plan: PlanId, interval: BillingInterval) {
+  const env = priceEnvFor(PLANS[plan], interval);
+  const price = env ? process.env[env] : undefined;
+  if (!price) throw new ApiError(interval === "year" ? `Annual billing is not available for the ${PLANS[plan].name} plan on this server` : `The ${PLANS[plan].name} plan is not configured for checkout (${env})`, interval === "year" ? 422 : 503);
+  return price;
+}
+
+export async function createCheckoutSession(args: { customer: string; plan: PlanId; interval?: BillingInterval; companyId: string; successUrl: string; cancelUrl: string }) {
+  const price = priceIdFor(args.plan, args.interval ?? "month");
   return stripe<{ id: string; url: string }>("/v1/checkout/sessions", [
-    ...form({ mode: "subscription", customer: args.customer, success_url: args.successUrl, cancel_url: args.cancelUrl, client_reference_id: args.companyId }),
+    ...form({ mode: "subscription", customer: args.customer, success_url: args.successUrl, cancel_url: args.cancelUrl, client_reference_id: args.companyId, allow_promotion_codes: "true" }),
     ...form({ price, quantity: 1 }, "line_items[0]"),
     ...form({ companyId: args.companyId, plan: args.plan }, "subscription_data[metadata]"),
     ...form({ companyId: args.companyId, plan: args.plan }, "metadata"),
   ]);
+}
+
+interface StripeSubscription { id: string; status: string; customer: string; cancel_at_period_end: boolean; current_period_end?: number; items: { data: { id: string; price: { id: string; recurring?: { interval: string } }; current_period_end?: number }[] } }
+
+/** Server-side retrieval: the source of truth when reconciling (never the browser). */
+export async function retrieveSubscription(id: string) {
+  return stripe<StripeSubscription>(`/v1/subscriptions/${encodeURIComponent(id)}`, null);
+}
+
+/**
+ * Change an existing subscription's plan/interval in place. Stripe prorates
+ * (create_prorations: the difference is credited/charged on the next invoice).
+ * The new entitlements apply when the resulting customer.subscription.updated
+ * webhook arrives — not when this call returns.
+ */
+export async function changeSubscriptionPlan(args: { subscriptionId: string; plan: PlanId; interval: BillingInterval; idempotencyKey: string }) {
+  const price = priceIdFor(args.plan, args.interval);
+  const sub = await retrieveSubscription(args.subscriptionId);
+  const item = sub.items?.data?.[0];
+  if (!item) throw new ApiError("The subscription has no items to change", 409);
+  return stripe<StripeSubscription>(`/v1/subscriptions/${encodeURIComponent(args.subscriptionId)}`, [
+    ...form({ id: item.id, price }, "items[0]"),
+    ...form({ proration_behavior: "create_prorations", cancel_at_period_end: "false" }),
+    ...form({ plan: args.plan }, "metadata"),
+  ], args.idempotencyKey);
+}
+
+/** Schedule cancellation at the end of the paid period (access continues until then). */
+export async function cancelSubscriptionAtPeriodEnd(subscriptionId: string, resume = false) {
+  return stripe<StripeSubscription>(`/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, form({ cancel_at_period_end: resume ? "false" : "true" }));
 }
 
 export async function createPortalSession(args: { customer: string; returnUrl: string }) {
@@ -77,6 +117,7 @@ export function signWebhook(rawBody: string, secret: string, t = Math.floor(Date
 }
 
 export function planForPrice(priceId: string | undefined | null): PlanId | null {
-  for (const p of Object.values(PLANS)) if (p.stripePriceEnv && process.env[p.stripePriceEnv] && process.env[p.stripePriceEnv] === priceId) return p.id;
+  if (!priceId) return null;
+  for (const p of Object.values(PLANS)) for (const env of [p.stripePriceEnv, p.stripePriceEnvYear]) if (env && process.env[env] === priceId) return p.id;
   return null;
 }

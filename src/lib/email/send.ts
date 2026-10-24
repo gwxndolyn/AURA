@@ -13,14 +13,20 @@ export function emailConfigured() {
   return { configured: missing.length === 0, missing };
 }
 
+/** One-time links (reset / verify / invite) must not sit in the outbox in usable form. */
+export function outboxCopy(body: string) {
+  return body.replace(/([?&](token|invite)=)[A-Za-z0-9%._-]+/g, "$1[redacted]");
+}
+
 export async function sendEmail(to: string, subject: string, body: string) {
-  const msg = await prisma.emailMessage.create({ data: { to, subject, body } });
+  const msg = await prisma.emailMessage.create({ data: { to, subject, body: outboxCopy(body) } });
   if (!emailConfigured().configured) return { id: msg.id, status: "PENDING" as const, sent: false };
   try {
     const r = await fetch(`${process.env.RESEND_API_BASE || "https://api.resend.com"}/emails`, {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ from: process.env.EMAIL_FROM, to: [to], subject, text: body }),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!r.ok) throw new Error(`provider returned ${r.status}`);
     await prisma.emailMessage.update({ where: { id: msg.id }, data: { status: "SENT", sentAt: new Date() } });

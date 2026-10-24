@@ -19,9 +19,9 @@ function bytesToB64url(bytes: ArrayBuffer): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function edgeSecret(): string {
+function edgeSecret(): string | null {
   const s = process.env.AUTH_SECRET;
-  if (!s || s.length < 16) return "aura-dev-insecure-secret-change-me";
+  if (!s || s.length < 16) return process.env.NODE_ENV === "production" ? null : "aura-dev-insecure-secret-change-me";
   return s;
 }
 
@@ -29,9 +29,11 @@ export async function verifySessionTokenEdge(token: string): Promise<{ userId: s
   try {
     const [data, sig] = token.split(".");
     if (!data || !sig) return null;
+    const secret = edgeSecret();
+    if (!secret) return null; // production without AUTH_SECRET: never accept tokens signed with the dev fallback
     const key = await crypto.subtle.importKey(
       "raw",
-      new TextEncoder().encode(edgeSecret()),
+      new TextEncoder().encode(secret),
       { name: "HMAC", hash: "SHA-256" },
       false,
       ["sign"],

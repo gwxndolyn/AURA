@@ -53,7 +53,7 @@ beforeAll(async () => {
   ws = (await createCompany({ name: "RT", mission: "m", industry: "SaaS", ownerId: users.owner.id })).id;
   other = (await createCompany({ name: "RT-O", mission: "m", industry: "SaaS", ownerId: users.outsider.id })).id;
   await prisma.workspaceMember.createMany({ data: [{ userId: users.member.id, companyId: ws, role: "MEMBER" }, { userId: users.viewer.id, companyId: ws, role: "VIEWER" }] });
-  await prisma.subscription.create({ data: { companyId: ws, plan: "pro", status: "active" } });
+  await prisma.subscription.create({ data: { companyId: ws, plan: "team", status: "active" } }); // goals need advancedAgents
   // Test-only handlers registered on the REAL registry (the worker dispatches through it).
   HANDLERS[`${T}.ok`] = async (job) => ({ id: job.id });
   HANDLERS[`${T}.flaky`] = async () => { throw Object.assign(new Error("transient"), { retryable: true, kind: "flaky" }); };

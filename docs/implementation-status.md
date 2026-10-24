@@ -1,10 +1,49 @@
 # Implementation status ledger
 
 The recovery point for continuing work. Each row says where the code is, what
-was **actually run** to verify it, and what is missing. Last update: 2026-10-23 (V7 product delivery).
+was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft).
 
 Status: **Verified** (tests run and passing) · **Implemented, unverified** ·
 **Partial** · **Blocked** (needs credentials/infrastructure) · **Not implemented**.
+
+## Product craft + agent team — AURA V9/V10 (2026-10-24)
+
+Design: [architecture/agent-team.md](architecture/agent-team.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| Operational prompt library (role cards + engineering/security rules), versioned, recorded per run | `agents/prompts.ts`, `definitions.ts`, `intelligence/registry.ts` | Verified | `orchestrator.test.ts` (all sections present, rules attached, verdict contract); benchmark asserts PM runs carry `@2026.10.24-2` | Prompt quality vs a live model unmeasured | Run the lab/eval with a live key; promote DRAFT versions on evidence |
+| Planning calls recorded as AgentRuns with promptRef (PM, designer, architect, change) | `factory/brief.ts` `structured()` | Verified | benchmark test 1; factory suites | — | — |
+| Chief-orchestrator policy: risk, review plan, gate per risk, inputs, recovery, disagreements, context provenance | `builder/orchestrator.ts`, `engine.ts` | Verified | `orchestrator.test.ts` (12); benchmark records `Build.orchestration` | Risk detection is lexical | — |
+| Handoff validation (no FRONTEND work without approved design; no dependant without architecture) | `scheduler.ts` + `missingInputs` | Verified (unit) | `orchestrator.test.ts` | Not exercised in an e2e with a DESIGN task | Add to benchmark |
+| Dependent tasks build on verified dependency branches | `engine.ts` | Verified | benchmark: frontend branch contains the verified API | Conflicts block (not auto-resolved) | — |
+| Browser verification (isolated app container + real Chromium, 2 viewports, a11y/overflow/errors/requests, persistence journey, screenshots) | `builder/browser.ts`, engine | Verified | `browser.test.ts` (good app passes; persistence bug, unlabeled field, mobile overflow, crash-on-start found); benchmark | Heuristic journey (first form); no visual-diff baseline | Visual regression baselines |
+| Browser-found defect → repair → re-verify | engine feedback + recovery | Verified | benchmark: attempt 1 tests pass, browser blocks (list not refreshed, unlabeled amount), attempt 2 verified | — | — |
+| Feature contracts per story, versioned, change flags verified work | `factory/contract.ts`, scheduler | Implemented, partially verified | contract injected into context in the benchmark (`contextManifest` has `contract`) | Contract-change flagging not covered by a test | Test a brief revision |
+| Quality metrics (journeys, browser clean, a11y, repair success, criteria met, unsupported claims) + browser gate criterion | `factory/scorecard.ts`, `gate.ts` | Verified | benchmark asserts values | Visual design quality not measured | — |
+| Office shows real build turns (implementing / verifying / reviewing) | `office/live.ts`, `state.ts` | Implemented | office suites pass | No dedicated test for run mapping | Add a unit test |
+| V10 benchmark (expense tracker) | `factory/v10.benchmark.test.ts` | **Passed** (4/4, ~51 s) with model double | PM plan → API verified (QA+security+review) → UI fails in browser, repaired, verified at 2 viewports with persistence → RC re-tested → real container deploy → totals/filter/validation over HTTP → **persistence across container restart** → follow-up "delete" change verified, original tests re-run | Model provider is a test double; live model behaviour unverified | Run with a live key |
+| Live model provider | — | **Blocked** (no key) | — | — | `ANTHROPIC_API_KEY` |
+
+## Commercial SaaS — AURA V8 (2026-10-24)
+
+Guide: [operations/commercial-saas.md](operations/commercial-saas.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| Tenant isolation on every resource kind (404), IDOR, background tenant scope | `auth/authz.ts`, routes, `builder/service.ts` | Verified | `commercial.test.ts` (14 resource kinds incl. downloads, deploy, export, jobs, SSE, screenshots) | — | — |
+| Named permission model + role enforcement + denial audit | `authz.ts` `PERMISSIONS` | Verified | commercial suite | — | — |
+| Invitations, seats, role changes, ownership transfer, removal | `auth/members.ts`, `/members/*`, `/invitations` | Verified | commercial suite (escalation refused, email-bound single-use, seat limit) | Email delivery needs Resend | Configure email |
+| Session revocation (logout, password change/reset, sign-out-everywhere), enumeration-safe login, per-account limits, CSRF origin check, prod dev-secret guard | `auth/session.ts`, `edge.ts`, `csrf.ts`, auth routes | Verified | commercial suite | In-process rate limiter | Shared limiter for multi-instance |
+| Email verification | `/api/auth/verify-email`, `/verify-email` | Verified (API) | commercial suite | UI not e2e-tested | e2e |
+| Plans as data, annual prices, downgrade guard, plan change with proration, cancel/resume, server-side sync, invoices, ordered + retried webhooks | `config/plans.json`, `billing/*` | Verified (Stripe API double) | commercial suite | **Live Stripe unverified** | One test-mode run |
+| Atomic quotas with reservations + recovery; spending cap | `billing/entitlements.ts` | Verified | 25 parallel → exactly 10; 6 parallel → 1 slot; release/settle/recover; cap stops a run | SQLite single writer | Postgres multi-worker test |
+| Idempotent usage ledger (basis, model, period) + reconciliation | `entitlements.ts` | Verified | duplicate + concurrent writes counted once | — | — |
+| Encrypted tenant secrets; deployment env only from tenant store; redaction (logs, audit, sandbox output, deploy logs) | `security/secrets.ts`, `redact.ts`, `deploy/service.ts` | Verified | commercial suite (AAD binding, server env never injected, redaction patterns) | Key rotation not implemented | Add key versions |
+| Audit categories/outcomes, admin viewer | `events/emit.ts`, `/audit-log`, Settings → Security | Verified (API) | commercial suite | — | — |
+| Export, archive/restore, retention purge, workspace/account deletion with honest retained-elsewhere list | `lifecycle/*`, routes | Verified | commercial suite | Retention purge not run in a test | Unit-test `runMaintenance` |
+| Commercial alerts, readiness, production config validation, platform admin | `runtime/observe.ts`, `health/ready`, `runtime/config.ts`, `/api/admin/overview` | Verified | commercial suite | In-app alerts only | Paging channel |
+| Settings UI: members, billing (monthly/annual, invoices, cancel), usage + cap, secrets, security/data, account security | `app/app/[id]/settings/page.tsx` | Implemented; `next build` passes | not e2e-tested | — | e2e spec |
 
 ## Product delivery — AURA V7 (2026-10-23)
 

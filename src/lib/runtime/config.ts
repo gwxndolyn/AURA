@@ -13,5 +13,17 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env) {
   for (const k of nums) if (env[k] !== undefined && !(Number(env[k]) > 0)) errors.push(`${k} must be a positive number`);
   if (env.AURA_WORKER && !["inline", "external", "off"].includes(env.AURA_WORKER)) errors.push("AURA_WORKER must be inline | external | off");
   if (!env.AURA_GIT_ROOT && env.NODE_ENV === "production") warnings.push("AURA_GIT_ROOT not set: product repositories go to the OS temp dir (not durable)");
+  if (env.NODE_ENV === "production") {
+    if (env.AURA_SIMULATION_LAB === "1") warnings.push("AURA_SIMULATION_LAB=1 in production: the simulation lab (fictional data, simulator output) is exposed to customers");
+    if (env.STRIPE_API_BASE || env.GITHUB_API_BASE || env.ANTHROPIC_BASE_URL?.includes("127.0.0.1") || env.RESEND_API_BASE) errors.push("A provider *_API_BASE test-double override is set in production (STRIPE_API_BASE / GITHUB_API_BASE / RESEND_API_BASE / local ANTHROPIC_BASE_URL)");
+    if (!env.NEXT_PUBLIC_APP_URL?.startsWith("https://")) warnings.push("NEXT_PUBLIC_APP_URL should be the https:// public URL (used for email links, checkout return URLs and the CSRF origin allowlist)");
+    if (env.STRIPE_SECRET_KEY && !env.STRIPE_WEBHOOK_SECRET) errors.push("STRIPE_SECRET_KEY is set without STRIPE_WEBHOOK_SECRET: subscriptions could never be confirmed");
+    if (env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) warnings.push("Stripe is in TEST mode: no real payments are taken");
+  }
+  const sk = env.AURA_SECRETS_KEY;
+  if (sk) {
+    const len = /^[0-9a-f]{64}$/i.test(sk) ? 32 : Buffer.from(sk, "base64").length;
+    if (len !== 32) errors.push("AURA_SECRETS_KEY must be 32 bytes (base64 or 64 hex chars)");
+  } else warnings.push("AURA_SECRETS_KEY not set: customers cannot store deployment secrets");
   return { errors, warnings, ok: errors.length === 0 };
 }

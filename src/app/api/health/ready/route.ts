@@ -28,6 +28,8 @@ export async function GET(req: Request) {
     const ws = await workersStatus();
     const online = ws.filter((w) => w.online);
     out.workers = { online: online.length, newestHeartbeatAgeMs: online[0]?.heartbeatAgeMs ?? null };
+    // Payment webhooks that failed and are awaiting the provider's retry (count only).
+    out.billingWebhooksFailing = await prisma.billingEvent.count({ where: { processed: false, attempts: { gt: 0 } } });
     if (new URL(req.url).searchParams.get("requireWorker") === "1" && !online.length) ready = false;
   }
   return new Response(JSON.stringify({ ready, ...out }), { status: ready ? 200 : 503, headers: { "content-type": "application/json", "cache-control": "no-store" } });

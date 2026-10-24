@@ -1,0 +1,38 @@
+{
+  "plans": [
+    {
+      "id": "free",
+      "name": "Starter",
+      "tagline": "Try the full workflow on a small project.",
+      "priceUsd": null,
+      "priceUsdYear": null,
+      "limits": { "products": 1, "buildsPerMonth": 10, "aiBudgetUsdPerMonth": 3, "concurrentBuilds": 1, "sandboxMinutesPerMonth": 60, "seats": 1, "deploysPerMonth": 0, "storageMb": 200, "retentionDays": 30, "githubConnections": 0 },
+      "features": { "githubIntegration": false, "pullRequests": false, "deploymentRequests": false, "productionDeploys": false, "advancedAgents": false, "prioritySupport": false },
+      "highlights": ["1 product", "10 engineering runs / month", "Isolated execution sandbox", "Download your source code"]
+    },
+    {
+      "id": "pro",
+      "name": "Pro",
+      "tagline": "For builders shipping real projects.",
+      "priceUsd": 49,
+      "priceUsdYear": 490,
+      "stripePriceEnv": "STRIPE_PRICE_PRO",
+      "stripePriceEnvYear": "STRIPE_PRICE_PRO_YEARLY",
+      "limits": { "products": 10, "buildsPerMonth": 150, "aiBudgetUsdPerMonth": 60, "concurrentBuilds": 2, "sandboxMinutesPerMonth": 1200, "seats": 3, "deploysPerMonth": 60, "storageMb": 5000, "retentionDays": 180, "githubConnections": 2 },
+      "features": { "githubIntegration": true, "pullRequests": true, "deploymentRequests": true, "productionDeploys": true, "advancedAgents": false, "prioritySupport": false },
+      "highlights": ["10 products", "150 engineering runs / month", "GitHub branches and pull requests", "Up to 3 teammates"]
+    },
+    {
+      "id": "team",
+      "name": "Team",
+      "tagline": "Shared workspaces with higher limits.",
+      "priceUsd": 199,
+      "priceUsdYear": 1990,
+      "stripePriceEnv": "STRIPE_PRICE_TEAM",
+      "stripePriceEnvYear": "STRIPE_PRICE_TEAM_YEARLY",
+      "limits": { "products": 50, "buildsPerMonth": 800, "aiBudgetUsdPerMonth": 300, "concurrentBuilds": 4, "sandboxMinutesPerMonth": 6000, "seats": 15, "deploysPerMonth": 400, "storageMb": 50000, "retentionDays": 365, "githubConnections": 10 },
+      "features": { "githubIntegration": true, "pullRequests": true, "deploymentRequests": true, "productionDeploys": true, "advancedAgents": true, "prioritySupport": true },
+      "highlights": ["50 products", "800 engineering runs / month", "Up to 15 teammates", "Engineering lab and autonomous goals", "Priority support"]
+    }
+  ]
+}

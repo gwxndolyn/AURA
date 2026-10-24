@@ -27,6 +27,7 @@ import { ProviderError } from "@/lib/ai/claude";
 import { log } from "@/lib/observability/log";
 import { recordOutcome, halfOpenDue } from "@/lib/runtime/breaker";
 import { tickSchedules } from "@/lib/runtime/schedule";
+import { runMaintenance } from "@/lib/lifecycle/retention";
 
 const CONCURRENCY = Math.min(Math.max(Number(process.env.AURA_WORKER_CONCURRENCY || 2), 1), 8);
 export const WORKER_STALE_MS = Number(process.env.AURA_WORKER_STALE_MS || 60_000);
@@ -126,8 +127,14 @@ export function startWorker(mode: "inline" | "standalone" = "inline") {
       void tickSchedules(id).catch((e) => log("error", "scheduler.tick_failed", { error: (e as Error).message }));
       void halfOpenDue().catch(() => null);
     }, Number(process.env.AURA_SCHEDULER_TICK_MS || 15_000));
+    // Maintenance: release leaked quota holds, apply retention, purge expired tokens, remove orphaned trees.
+    const maint = setInterval(() => {
+      if (stopping) return;
+      void runMaintenance().catch((e) => log("error", "maintenance.failed", { error: (e as Error).message }));
+    }, Number(process.env.AURA_MAINTENANCE_INTERVAL_MS || 15 * 60_000));
     hb.unref?.();
     sched.unref?.();
+    maint.unref?.();
     for (let i = 0; i < CONCURRENCY; i++) {
       void (async () => {
         while (!stopping) {

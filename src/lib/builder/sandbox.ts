@@ -13,6 +13,7 @@ import { prisma } from "@/lib/db";
 import { execInSandbox, dockerAvailable, type Workspace } from "@/lib/sandbox/docker";
 import { JobError } from "@/lib/jobs/queue";
 import { recordUsage } from "@/lib/billing/entitlements";
+import { redactText } from "@/lib/security/redact";
 import type { Tree } from "./workspace";
 
 export const OUTPUT_CAP = 48 * 1024;
@@ -66,7 +67,8 @@ export async function runInTree(args: { buildId: string; companyId: string; tree
   // `docker run` itself failed (daemon/image/storage error, exit 125) — the command never ran. That is an
   // infrastructure failure, never a verdict on the project's code.
   if (isDaemonFailure(r.exitCode, r.stderr)) throw new JobError(`The execution sandbox failed to start a container: ${r.stderr.replace(/\s+/g, " ").slice(0, 200)}`, true, "sandbox_unavailable");
-  const output = (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim();
+  // Scrub credentials before the output is stored, shown to customers or fed back into a model prompt.
+  const output = redactText((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim());
   const row = await prisma.commandRun.create({
     data: { buildId: args.buildId, companyId: args.companyId, purpose: args.purpose, actor: args.actor, command: args.command, network, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, output: output.slice(-OUTPUT_CAP), truncated: output.length > OUTPUT_CAP },
   });

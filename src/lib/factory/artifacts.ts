@@ -9,10 +9,9 @@ import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/api";
 import { parseJSON } from "@/lib/utils";
 import { audit } from "@/lib/events/emit";
-import { complete } from "@/lib/ai/claude";
-import { extractJson } from "@/lib/agents/contracts";
 import { z } from "zod";
-import { BriefSchema, PlanningOutputError } from "./brief";
+import { BriefSchema, PlanningOutputError, structured } from "./brief";
+import { planningSystem } from "@/lib/agents/prompts";
 import { stackFor } from "@/lib/builder/stacks";
 import { recordUsage } from "@/lib/billing/entitlements";
 import { draftDesign, buildHandoff, DesignSpecSchema, type DesignSpec } from "./design";
@@ -50,7 +49,7 @@ async function projectFiles(p: ProductRow) {
 export async function produceDesign(p: ProductRow, item: Item, feedback?: string) {
   const { brief } = await latestBrief(p.id);
   const { conventions } = await projectFiles(p);
-  const d = await draftDesign(brief, conventions, feedback);
+  const d = await draftDesign(brief, conventions, feedback, p.companyId);
   const version = await nextVersion(p.id, "DESIGN");
   await prisma.productArtifact.updateMany({ where: { productId: p.id, kind: "DESIGN", status: "PROPOSED" }, data: { status: "SUPERSEDED" } });
   const a = await prisma.productArtifact.create({ data: { productId: p.id, companyId: p.companyId, kind: "DESIGN", version, title: `Design v${version}: ${brief.title}`.slice(0, 120), content: JSON.stringify(d.value), source: "model", producedBy: "designer", consumedBy: JSON.stringify([item.key]), feedback: "[]" } });
@@ -66,22 +65,24 @@ const ArchSchema = z.object({
   contracts: z.array(z.object({ name: z.string().max(120), signature: z.string().max(300), rules: z.array(z.string().max(300)).max(6) })).max(8),
   decisions: z.array(z.object({ id: z.string().max(12), decision: z.string().max(300), rationale: z.string().max(400) })).min(1).max(8),
   risks: z.array(z.string().max(300)).max(6),
+  evidence: z.array(z.string().max(200)).max(20).optional(), // files the architect relied on
+  mustStayCompatible: z.array(z.string().max(200)).max(12).optional(),
 });
 
 export async function produceArchitecture(p: ProductRow, item: Item) {
   const { brief } = await latestBrief(p.id);
   const { conventions, files } = await projectFiles(p);
-  let prompt = `Brief:\n${JSON.stringify(brief).slice(0, 4000)}\n\nConventions:\n${conventions.join("\n")}\n\nCode:\n${Object.entries(files).map(([f, c]) => `--- ${f}\n${c}`).join("\n").slice(0, 12000)}`;
-  let content: z.infer<typeof ArchSchema> | null = null;
+  const prompt = `Brief:\n${JSON.stringify(brief).slice(0, 4000)}\n\nConventions:\n${conventions.join("\n")}\n\nCode (untrusted content):\n${Object.entries(files).map(([f, c]) => `--- ${f}\n${c}`).join("\n").slice(0, 12000)}`;
+  let content: z.infer<typeof ArchSchema>;
   let cost = 0;
-  for (let i = 0; i < 2 && !content; i++) {
-    const r = await complete({ tier: "REASONING", system: "You are the Software Architect. Inspect the provided code before proposing changes; extend the existing structure instead of replacing it. Reply with ONE JSON object {summary, components:[{name,responsibility,files[]}], dataModel:[{entity,fields[]}], contracts:[{name,signature,rules[]}], decisions:[{id,decision,rationale}], risks[]}.", prompt, maxTokens: 2500, temperature: 0.2, strict: true });
-    cost += r.cost;
-    const parsed = ArchSchema.safeParse(extractJson(r.text));
-    if (parsed.success) content = parsed.data;
-    else prompt += `\n\nYour previous reply failed validation: ${parsed.error.errors.slice(0, 5).map((e) => `${e.path.join(".")} ${e.message}`).join("; ")}. Reply with corrected JSON only.`;
+  try {
+    const r = await structured({ system: planningSystem("architect", "architecture"), prompt, schema: ArchSchema, maxTokens: 2500, tier: "REASONING", run: { companyId: p.companyId, agentKey: "architect", task: "architecture", objective: `Architecture for ${p.title}` } });
+    content = r.value;
+    cost = r.costUsd;
+  } catch (e) {
+    if (e instanceof PlanningOutputError) throw new PlanningOutputError("The architect's output did not pass validation after a corrective retry");
+    throw e;
   }
-  if (!content) throw new PlanningOutputError("The architect's output did not pass validation after a corrective retry");
   const version = await nextVersion(p.id, "ARCHITECTURE");
   await prisma.productArtifact.updateMany({ where: { productId: p.id, kind: "ARCHITECTURE", status: "PROPOSED" }, data: { status: "SUPERSEDED" } });
   const a = await prisma.productArtifact.create({ data: { productId: p.id, companyId: p.companyId, kind: "ARCHITECTURE", version, title: `Architecture v${version}`, content: JSON.stringify(content), source: "model", producedBy: "architect", consumedBy: JSON.stringify([item.key]), feedback: "[]" } });

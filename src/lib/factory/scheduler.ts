@@ -27,6 +27,8 @@ import { BUDGET_ALERT_RATIO } from "./policy";
 import { readyKeys, derivePhase, rollUp, type ItemStatus } from "./lifecycle";
 import { mayAutoDispatch, needsApproval, type Autonomy } from "./policy";
 import { loadProduct, limitsOf, setItemStatus, appendItemHistory, movePhase, productEvent, requestApproval, type Evidence, type ProductRow } from "./store";
+import { missingInputs } from "@/lib/builder/orchestrator";
+import { syncFeatureContracts } from "./contract";
 import { produceDesign, produceArchitecture } from "./artifacts";
 
 const LEASE_MS = 60_000;
@@ -165,6 +167,10 @@ export async function tickProduct(companyId: string, productId: string, opts: { 
     if (spend >= limits.projectBudgetUsd * BUDGET_ALERT_RATIO) {
       await prisma.notification.upsert({ where: { companyId_dedupeKey: { companyId, dedupeKey: `product-budget:${productId}:${overBudget ? "exhausted" : "warning"}` } }, create: { companyId, dedupeKey: `product-budget:${productId}:${overBudget ? "exhausted" : "warning"}`, kind: "budget", severity: overBudget ? "high" : "medium", title: overBudget ? `${p.title}: product budget reached — new work paused` : `${p.title}: ${Math.round((spend / limits.projectBudgetUsd) * 100)}% of the product budget used`, body: `Estimated model spend $${spend.toFixed(2)} of $${limits.projectBudgetUsd.toFixed(2)}. Raise the limit in product settings to continue.`, href: `/products/${productId}?tab=usage` }, update: {} });
     }
+    const designTaskKeys = items.filter((i) => i.kind === "DESIGN" && i.status !== "CANCELLED").map((i) => i.key);
+    const archTaskKeys = items.filter((i) => i.kind === "ARCHITECTURE" && i.status !== "CANCELLED").map((i) => i.key);
+    const approved = await prisma.productArtifact.findMany({ where: { productId, companyId, status: "APPROVED", kind: { in: ["HANDOFF", "ARCHITECTURE"] } }, select: { kind: true } });
+    const upstream = { designTaskKeys, archTaskKeys, hasApprovedHandoff: approved.some((a) => a.kind === "HANDOFF"), hasApprovedArchitecture: approved.some((a) => a.kind === "ARCHITECTURE") };
     for (const item of ordered) {
       if (item.status === "TODO") await setItemStatus(item, "READY", ENGINE, "dependencies satisfied");
       const cur = (await prisma.backlogItem.findUnique({ where: { id: item.id } }))!;
@@ -202,6 +208,12 @@ export async function tickProduct(companyId: string, productId: string, opts: { 
         out.waitingOn.push(`${cur.key}: shares files with running work`);
         continue;
       }
+      // Handoff validation: downstream work never starts with a mandatory upstream artifact missing.
+      const missing = missingInputs({ kind: cur.kind, dependsOn: parseJSON<string[]>(cur.dependsOn, []) }, upstream);
+      if (missing.length) {
+        out.waitingOn.push(`${cur.key}: waiting for ${missing.join(" and ")}`);
+        continue;
+      }
       if (cur.attempts >= limits.maxAttempts) {
         const reason = `Reached the dispatch limit (${limits.maxAttempts}); needs a person to narrow the task or raise the limit`;
         await setItemStatus(cur, "BLOCKED", ENGINE, reason, { verification: "BLOCKED", blockedReason: reason });
@@ -217,6 +229,10 @@ export async function tickProduct(companyId: string, productId: string, opts: { 
       out.dispatched.push(cur.key);
       slots--;
     }
+
+    // Feature contracts: one shared definition per story; a changed definition flags already-verified tasks.
+    const contractChanges = await syncFeatureContracts(companyId, productId).catch(() => []);
+    for (const c of contractChanges) if (c.affected.length) await productEvent(companyId, productId, `Feature contract ${c.story} changed (v${c.version}); verified work to re-check: ${c.affected.join(", ")}`, { level: "warning", actor: "product-manager" });
 
     // 3) Roll up stories/epics and derive the phase from the backlog.
     items = await prisma.backlogItem.findMany({ where: { productId } });

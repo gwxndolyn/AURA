@@ -505,6 +505,9 @@ interface RunDetail extends RunRow {
   findings: { source: string; severity: string; title: string; detail: string; evidence: string; blocking: boolean }[];
   commands: { id: string; purpose: string; actor: string; command: string; network: boolean; exitCode: number | null; timedOut: boolean; durationMs: number; truncated: boolean; createdAt: string }[];
   job: { status: string; attempts: number; maxAttempts: number; lastError: string; errorKind: string | null; runAt: string } | null;
+  orchestration: { risk?: string; riskReasons?: string[]; reviewers?: string[]; reviewPolicy?: string; gatePolicy?: string; inputs?: { design: string | null; architecture: string | null }; attempts?: { attempt: number; passed: boolean; recovery?: string; decision?: string | null; disagreement?: boolean }[] };
+  contextManifest: { id: string; provenance: string; chars: number }[];
+  browser: { status?: string; reason?: string; routes?: { route: string; viewport: string; httpStatus: number | null; screenshot: string | null }[]; journeys?: { name: string; status: string; detail: string }[]; findings?: { kind: string; route: string; viewport: string; detail: string; blocking: boolean }[] };
 }
 
 /** Engineering runs: phase, attempts, criteria with evidence, findings and every command with its REAL output. */
@@ -561,6 +564,28 @@ function RunsTab({ companyId, productId, run, setRun, canAct, version }: { compa
           )}
           {r.findings.length > 0 && (
             <section><div className="metric-label mb-1">Findings</div><ul className="space-y-1 text-xs">{r.findings.map((f, i) => <li key={i}><Badge tone={f.blocking ? "danger" : "neutral"}>{f.source} · {f.severity}{f.blocking ? " · blocking" : ""}</Badge> <span className="font-medium">{f.title}</span> <span className="text-text-muted">{f.detail}</span></li>)}</ul></section>
+          )}
+          {r.browser?.status && (
+            <section data-testid="browser-evidence">
+              <div className="metric-label mb-1">Browser verification <Badge tone={r.browser.status === "passed" ? "success" : r.browser.status === "failed" ? "danger" : "warning"}>{r.browser.status === "unavailable" ? "not run" : r.browser.status}</Badge></div>
+              {r.browser.status === "unavailable" ? <p className="text-xs text-text-muted">{r.browser.reason} — browser-visible behaviour is unverified.</p> : (
+                <>
+                  <ul className="space-y-0.5 text-xs">{(r.browser.journeys ?? []).map((j) => <li key={j.name}><Badge tone={j.status === "passed" ? "success" : j.status === "failed" ? "danger" : "neutral"}>{j.status.replace("_", " ")}</Badge> {j.name} <span className="text-text-muted">— {j.detail}</span></li>)}</ul>
+                  <div className="mt-2 flex flex-wrap gap-2">{(r.browser.routes ?? []).filter((x) => x.screenshot).map((x) => <a key={`${x.route}-${x.viewport}`} href={x.screenshot!} target="_blank" rel="noreferrer" className="block rounded border border-border p-1 text-2xs text-text-muted hover:border-border-strong"><img src={x.screenshot!} alt={`Screenshot of ${x.route} at ${x.viewport}`} className="h-28 w-auto object-cover object-top" loading="lazy" /><span className="mono">{x.route} · {x.viewport}</span></a>)}</div>
+                </>
+              )}
+            </section>
+          )}
+          {r.orchestration?.risk && (
+            <details className="text-xs" data-testid="orchestration">
+              <summary className="cursor-pointer text-text-muted">How this run was coordinated: {r.orchestration.risk.toLowerCase()} risk · {r.orchestration.reviewers?.length ?? 0} reviewers · gate {r.orchestration.gatePolicy}</summary>
+              <div className="mt-1 space-y-1 text-text-muted">
+                <p>{r.orchestration.reviewPolicy}{r.orchestration.riskReasons?.length ? ` — sensitive: ${r.orchestration.riskReasons.join(", ")}` : ""}</p>
+                <p>Inputs: {[r.orchestration.inputs?.architecture, r.orchestration.inputs?.design].filter(Boolean).join(" · ") || "no upstream design/architecture artifacts"}</p>
+                <ul>{(r.orchestration.attempts ?? []).map((a) => <li key={a.attempt}>Attempt {a.attempt + 1}: {a.passed ? "tests passed" : "tests failed"}{a.recovery ? ` → recovery: ${a.recovery.replace(/_/g, " ")}` : ""}{a.decision ? ` · ${a.decision}` : ""}{a.disagreement ? " (reviewers disagreed)" : ""}</li>)}</ul>
+                {r.contextManifest?.length > 0 && <p>Context given to the engineer: {r.contextManifest.map((c) => `${c.id} (${c.provenance})`).join("; ")}</p>}
+              </div>
+            </details>
           )}
           {r.stopReason && <p className="text-xs text-text-muted">Stopped early: {r.stopReason.replace(/_/g, " ")}</p>}
           <ImpactView impact={r.impact} />

@@ -14,6 +14,7 @@ export function PricingCards() {
             <div className="font-medium">{p.name}</div>
             <p className="mt-1 text-sm text-text-muted">{p.tagline}</p>
             <div className="mt-5 text-3xl font-semibold">{p.priceUsd === null ? "Free" : `$${p.priceUsd}`}<span className="text-sm font-normal text-text-faint">{p.priceUsd === null ? "" : " / month"}</span></div>
+            {p.priceUsdYear !== null && p.priceUsd !== null && <p className="mt-1 text-xs text-text-faint">or ${p.priceUsdYear} / year (2 months free)</p>}
             <ul className="mt-5 flex-1 space-y-2 text-sm">
               {p.highlights.map((h) => <li key={h} className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-brand" />{h}</li>)}
               <li className="flex gap-2 text-text-muted"><Check className="mt-0.5 h-4 w-4 shrink-0 text-text-faint" />${p.limits.aiBudgetUsdPerMonth} AI usage / month included</li>

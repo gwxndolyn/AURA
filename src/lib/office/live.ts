@@ -14,7 +14,7 @@ const OPEN_MISSION = ["DRAFT", "PLANNING", "AWAITING_APPROVAL", "READY", "RUNNIN
 export async function officeSnapshot(companyId: string, now = new Date()) {
   const since = new Date(now.getTime() - 24 * 3600_000);
   const recentTask = new Date(now.getTime() - 30 * 60_000);
-  const [agents, tasks, handoffs, findings, approvals, execRuns, items, artifacts, runs] = await Promise.all([
+  const [agents, tasks, handoffs, findings, approvals, execRuns, items, artifacts, runs, liveBuilds, liveAgentRuns] = await Promise.all([
     prisma.agent.findMany({ where: { companyId }, select: { key: true, name: true, role: true, status: true, available: true }, orderBy: { key: "asc" } }),
     prisma.missionTask.findMany({
       where: {
@@ -33,7 +33,11 @@ export async function officeSnapshot(companyId: string, now = new Date()) {
     prisma.backlogItem.findMany({ where: { companyId, status: { in: ["IN_PROGRESS", "BLOCKED"] }, product: { status: "ACTIVE" } }, take: 100, select: { id: true, key: true, title: true, kind: true, status: true, blockedReason: true, missionId: true, productId: true, capabilities: true, product: { select: { title: true } } } }),
     prisma.productArtifact.findMany({ where: { companyId, status: "PROPOSED", kind: { in: ["DESIGN", "ARCHITECTURE"] }, product: { status: "ACTIVE" } }, take: 20, orderBy: { createdAt: "desc" }, select: { id: true, kind: true, title: true, version: true, status: true, producedBy: true, productId: true, product: { select: { title: true } } } }),
     prisma.missionTaskRun.findMany({ where: { companyId, startedAt: { gte: since }, mission: { source: { not: "SEEDED" } } }, orderBy: { startedAt: "desc" }, take: 60, select: { id: true, missionId: true, taskKey: true, agentKey: true, status: true, outcome: true, errorCategory: true, startedAt: true } }),
+    // Product engineering runs executing right now (the builder), and the agent turns running inside them.
+    prisma.build.findMany({ where: { companyId, status: "RUNNING" }, take: 20, select: { id: true, productId: true, itemKey: true, phase: true, attempt: true } }),
+    prisma.agentRun.findMany({ where: { companyId, status: "RUNNING", createdAt: { gte: new Date(now.getTime() - 2 * 3600_000) } }, orderBy: { createdAt: "desc" }, take: 40, select: { id: true, objective: true, createdAt: true, agent: { select: { key: true } } } }),
   ]);
+  const productTitles = new Map((await prisma.product.findMany({ where: { companyId, id: { in: [...new Set(liveBuilds.map((b) => b.productId))] } }, select: { id: true, title: true } })).map((p) => [p.id, p.title]));
 
   const agentIn: OfficeAgentInput[] = agents;
   const taskIn: OfficeTaskInput[] = tasks.map((t) => ({
@@ -53,7 +57,19 @@ export async function officeSnapshot(companyId: string, now = new Date()) {
     output: t.output.slice(0, 300),
   }));
   // BacklogItem has no single owner: the first agent in its capability list is shown as the owner.
+  // An agent appears as working in a build only while it has a RUNNING AgentRun (a real model turn in progress);
+  // the build phase decides whether that is implementing, testing or reviewing. No run → no animation.
+  const runWork: OfficeWorkInput[] = liveAgentRuns.flatMap((r) => {
+    const id = r.objective.match(/^\[build ([a-z0-9]+)\]/)?.[1];
+    const b = id ? liveBuilds.find((x) => x.id === id) : undefined;
+    if (!b) return [];
+    const key = r.agent.key;
+    const activity = b.phase === "review" ? (key === "qa-engineer" ? "testing" : "reviewing") : b.phase === "verify" ? "testing" : key === "product-manager" || key === "architect" ? "planning" : key === "designer" ? "designing" : "coding";
+    const verb = { coding: b.attempt > 0 ? `Repairing (attempt ${b.attempt + 1})` : "Implementing", testing: "Verifying", reviewing: "Reviewing", planning: "Planning", designing: "Designing" }[activity as "coding"] ?? "Working on";
+    return [{ id: `run-${r.id}`, agentKey: key, kind: "run" as const, title: `${verb} ${b.itemKey}`, status: "RUNNING", productId: b.productId, productTitle: productTitles.get(b.productId) ?? "", buildId: b.id, runActivity: activity as OfficeWorkInput["runActivity"] }];
+  });
   const workIn: OfficeWorkInput[] = [
+    ...runWork,
     ...items.flatMap((i) => {
       const owner = parseJSON<string[]>(i.capabilities, [])[0];
       return owner ? [{ id: i.id, agentKey: owner, kind: "item" as const, title: `${i.key} ${i.title}`, status: i.status, itemKind: i.kind, productId: i.productId, productTitle: i.product.title, blockedReason: i.blockedReason, missionId: i.missionId }] : [];

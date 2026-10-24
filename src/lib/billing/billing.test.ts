@@ -63,7 +63,7 @@ describe("billing", () => {
     expect((await effectivePlan(ws)).plan.id).toBe("free");
     await expect(assertCanStart(ws, "github")).rejects.toBeInstanceOf(QuotaError);
     await recordUsage(ws, [{ metric: "build", quantity: 10 }], "test");
-    await expect(assertCanStart(ws, "build")).rejects.toThrow(/Monthly engineering-run limit/);
+    await expect(assertCanStart(ws, "build")).rejects.toThrow(/Limit reached: 10 of 10 engineering runs this month on the Starter plan/);
   });
 
   it("checkout: members can't start it; owners get a Stripe URL; nothing changes until the webhook", async () => {

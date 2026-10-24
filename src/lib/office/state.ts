@@ -54,7 +54,7 @@ export interface OfficeTaskInput {
 export interface OfficeWorkInput {
   id: string;
   agentKey: string;
-  kind: "item" | "artifact";
+  kind: "item" | "artifact" | "run";
   title: string;
   status: string; // BacklogItem.status or ProductArtifact.status
   itemKind?: string; // BacklogItem.kind / ProductArtifact.kind (DESIGN, ARCHITECTURE, …)
@@ -62,6 +62,9 @@ export interface OfficeWorkInput {
   productTitle: string;
   blockedReason?: string;
   missionId?: string | null;
+  /** kind "run": the live engineering run and the phase/activity of THIS agent in it (from Build + AgentRun rows). */
+  buildId?: string;
+  runActivity?: Activity;
 }
 
 export interface OfficeInteraction {
@@ -146,9 +149,15 @@ function pickTask(tasks: OfficeTaskInput[], now: number) {
  * agent never crashes the office). `now` is injected for determinism.
  */
 function pickWork(work: OfficeWorkInput[]): { work: OfficeWorkInput; activity: Activity; location: LocationId; label: string } | null {
-  const order = (w: OfficeWorkInput) => (w.kind === "item" && w.status === "IN_PROGRESS" ? 0 : w.kind === "item" && w.status === "BLOCKED" ? 1 : 2);
-  const w = [...work].filter((x) => (x.kind === "item" ? x.status === "IN_PROGRESS" || x.status === "BLOCKED" : x.status === "PROPOSED")).sort((a, b) => order(a) - order(b) || a.id.localeCompare(b.id))[0];
+  const order = (w: OfficeWorkInput) => (w.kind === "run" ? -1 : w.kind === "item" && w.status === "IN_PROGRESS" ? 0 : w.kind === "item" && w.status === "BLOCKED" ? 1 : 2);
+  const w = [...work].filter((x) => (x.kind === "run" ? true : x.kind === "item" ? x.status === "IN_PROGRESS" || x.status === "BLOCKED" : x.status === "PROPOSED")).sort((a, b) => order(a) - order(b) || a.id.localeCompare(b.id))[0];
   if (!w) return null;
+  // A live AgentRun of this agent inside a running build: the most direct evidence of what it is doing.
+  if (w.kind === "run") {
+    const act = w.runActivity ?? "coding";
+    const location: LocationId = act === "testing" ? "qa" : act === "reviewing" ? (w.agentKey === "security-engineer" ? "security" : "collaboration") : act === "planning" ? "planning" : act === "designing" ? "design" : "engineering";
+    return { work: w, activity: act, location, label: w.title };
+  }
   const design = w.itemKind === "DESIGN";
   const arch = w.itemKind === "ARCHITECTURE";
   if (w.kind === "artifact") return { work: w, activity: "awaiting_approval", location: design ? "design" : "planning", label: `${design ? "Design" : arch ? "Architecture" : "Artifact"} waiting for your review: ${w.title}` };

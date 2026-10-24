@@ -26,6 +26,40 @@ model User {
   memberships   WorkspaceMember[]
   resetTokens   PasswordResetToken[]
   deletedAt     DateTime? // account deletion request (data removed by deleteAccount)
+  // Bumped on password change / "sign out everywhere": tokens carrying an older value are rejected.
+  sessionVersion Int      @default(0)
+  emailVerifiedAt DateTime?
+  // Platform operator (not a tenant role). Grants only the audited /api/admin surface.
+  isPlatformAdmin Boolean @default(false)
+}
+
+// A signed-out session (token jti) — rejected until the token would have expired anyway.
+model RevokedSession {
+  jti       String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+// Pending invitation to a workspace. Only the sha256 of the emailed token is stored.
+model Invitation {
+  id         String    @id @default(cuid())
+  companyId  String
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email      String
+  role       String    // ADMIN | MEMBER | VIEWER (never OWNER)
+  tokenHash  String    @unique
+  invitedBy  String    // user id
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  acceptedBy String?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([companyId])
+  @@index([email])
 }
 
 // Workspace membership: scopes a user to a company with a role.
@@ -48,6 +82,7 @@ model PasswordResetToken {
   id        String   @id @default(cuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   String   @default("reset") // reset | verify_email
   tokenHash String   @unique // sha256 of the raw token
   expiresAt DateTime
   usedAt    DateTime?
@@ -83,9 +118,12 @@ model Company {
   simSpeed      Int      @default(1)
   simRunning    Boolean  @default(false)
 
-  // Workspace-level AI budget limits (USD). Enforced server-side.
+  // Workspace-level AI budget limits (USD). monthlyBudgetUsd is the customer's own
+  // spending cap: the effective monthly AI budget is min(plan budget, this value).
   dailyBudgetUsd   Float @default(25)
   monthlyBudgetUsd Float @default(500)
+  // Command output, deployment logs and finished work trees older than this are purged (src/lib/lifecycle/retention.ts).
+  retentionDays    Int   @default(90)
 
   ownerId   String
   owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
@@ -140,6 +178,11 @@ model Company {
   deployTargets   DeployTarget[]
   productDeploys  ProductDeployment[]
   schedules       Schedule[]
+  invitations     Invitation[]
+  secrets         WorkspaceSecret[]
+  invoices        Invoice[]
+  usageCounters   UsageCounter[]
+  reservations    UsageReservation[]
 
   @@index([ownerId])
 }
@@ -565,6 +608,8 @@ model ToolCall {
   @@index([runId])
 }
 
+// Append-only (no code path updates or deletes rows; enforced by src/lib/audit/audit.test.ts).
+// Removed only when the whole workspace is deleted.
 model AuditLog {
   id        String   @id @default(cuid())
   companyId String
@@ -573,9 +618,13 @@ model AuditLog {
   action    String
   target    String
   result    String
+  category  String   @default("activity") // security | membership | billing | integration | execution | deployment | secret | data | activity
+  outcome   String   @default("success")  // success | denied | failure
+  meta      String   @default("{}")       // JSON, redacted
   createdAt DateTime @default(now())
 
   @@index([companyId, createdAt])
+  @@index([companyId, category, createdAt])
 }
 
 model TimelineEvent {
@@ -1223,7 +1272,9 @@ model Product {
   title          String
   idea           String
   phase          String   @default("DISCOVERY") // see PHASES in src/lib/factory/lifecycle.ts
-  status         String   @default("ACTIVE")    // ACTIVE | PAUSED | CANCELLED
+  status         String   @default("ACTIVE")    // ACTIVE | PAUSED | CANCELLED | ARCHIVED (read-only; restorable)
+  archivedAt     DateTime?
+  archivedFrom   String?  // status before archival (restored on unarchive)
   stack          String   @default("node-web") // builder stack template (src/lib/builder/stacks.ts)
   qualityProfile String   @default("web-app") // delivery gate profile (src/lib/factory/gate.ts)
   planningStatus String   @default("READY") // QUEUED | RUNNING | READY | FAILED (AI planning job)
@@ -1489,6 +1540,13 @@ model Build {
   budgetUsd   Float    @default(1)   // per-run model budget (product limits.budgetUsd); hard stop
   stopReason  String   @default("") // why the run stopped early: repeated_failure | task_budget | ...
   impact      String   @default("{}") // JSON change-impact analysis of the last attempt (src/lib/builder/intel.ts)
+  // Chief-orchestrator decisions for this run (src/lib/builder/orchestrator.ts): risk, reviewers, gate policy,
+  // recovery strategies per attempt, reviewer disagreements and how they were resolved.
+  orchestration String @default("{}")
+  // Provenance of the context given to the implementing agent on the last attempt: [{id, provenance, chars}].
+  contextManifest String @default("[]")
+  // Last browser verification (src/lib/builder/browser.ts): {status, reason?, routes[], findings[], journeys[]} — observations only.
+  browser String @default("{}")
   container   String?  // name of the sandbox container currently executing (cancellation kills it)
   correlationId String
   createdBy   String
@@ -1534,6 +1592,9 @@ model Subscription {
   stripeSubscriptionId String? @unique
   currentPeriodEnd   DateTime?
   cancelAtPeriodEnd  Boolean  @default(false)
+  interval           String   @default("month") // month | year
+  // Provider timestamp of the newest subscription event applied (older, out-of-order events are ignored).
+  lastEventAt        DateTime?
   updatedAt          DateTime @updatedAt
 }
 
@@ -1541,21 +1602,115 @@ model BillingEvent {
   id        String   @id // Stripe event id (idempotency)
   type      String
   companyId String?
-  processed Boolean  @default(false)
+  processed Boolean  @default(false) // false after a failed attempt: the provider's retry processes it again
+  attempts  Int      @default(0)
+  error     String   @default("")
   detail    String   @default("")
   createdAt DateTime @default(now())
 }
 
+// Invoices as reported by the payment provider's signed webhooks (amounts in the smallest currency unit).
+model Invoice {
+  id          String   @id // provider invoice id
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  number      String   @default("")
+  status      String   // draft | open | paid | uncollectible | void
+  currency    String   @default("usd")
+  amountDue   Int      @default(0)
+  amountPaid  Int      @default(0)
+  hostedUrl   String   @default("")
+  periodStart DateTime?
+  periodEnd   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([companyId, createdAt])
+}
+
+// Usage ledger: one row per consumed quantity. idempotencyKey makes retries and duplicate events harmless.
 model UsageEvent {
   id        String   @id @default(cuid())
   companyId String
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  metric    String   // ai_tokens_in | ai_tokens_out | ai_cost_usd | sandbox_ms | build | product
+  metric    String   // ai_tokens_in | ai_tokens_out | ai_cost_usd | sandbox_ms | build | product | deploy
   quantity  Float
   source    String   // build:<id> | product:<id> | agent_run:<id>
+  idempotencyKey String? @unique
+  userId    String?
+  productId String?
+  model     String?
+  // How the quantity is known: provider_reported (tokens, durations) | estimated (cost at list prices) | counted
+  basis     String   @default("counted")
+  period    String   @default("") // billing period (UTC YYYY-MM) the quantity counts against
   createdAt DateTime @default(now())
 
   @@index([companyId, metric, createdAt])
+}
+
+// Gating counter per metric and period (YYYY-MM, or "live" for gauges like concurrent runs).
+// Updated with single-row conditional UPDATEs so parallel requests cannot exceed a limit.
+model UsageCounter {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  metric    String
+  period    String
+  used      Float    @default(0)
+  reserved  Float    @default(0)
+  version   Int      @default(0) // bumped by every write; reconciliation only applies if unchanged
+
+  @@unique([companyId, metric, period])
+}
+
+// A hold on quota for work that has not finished. RESERVED → SETTLED (work consumed usage) | RELEASED (nothing consumed).
+model UsageReservation {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  metric    String
+  period    String
+  quantity  Float
+  ref       String   // build:<id> | … (one active hold per ref + metric)
+  status    String   @default("RESERVED")
+  consumed  Float    @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  settledAt DateTime?
+
+  @@unique([ref, metric])
+  @@index([companyId, status])
+  @@index([status, expiresAt])
+}
+
+// Customer secrets (deployment env vars). AES-256-GCM with AURA_SECRETS_KEY; values are never returned by any API.
+model WorkspaceSecret {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name       String
+  ciphertext String   // base64
+  iv         String   // base64
+  tag        String   // base64
+  keyVersion Int      @default(1)
+  createdBy  String
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([companyId, name])
+}
+
+// Platform-operator actions (not tenant-scoped). Append-only.
+model PlatformAudit {
+  id        String   @id @default(cuid())
+  actor     String
+  action    String
+  target    String   @default("")
+  result    String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 // ---------------------------------------------------------------------------

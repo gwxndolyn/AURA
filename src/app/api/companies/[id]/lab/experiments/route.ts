@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ok, handler, parseBody } from "@/lib/api";
+import { assertFeature } from "@/lib/billing/entitlements";
 import { requireWorkspaceAccess } from "@/lib/auth/authz";
 import { proposeExperiment } from "@/lib/lab/lab";
 
@@ -19,6 +20,7 @@ const Proposal = z.object({
 export const POST = handler(async (req, ctx: Ctx) => {
   const { id } = await ctx.params;
   const { user } = await requireWorkspaceAccess(id, "ADMIN");
+  await assertFeature(id, "advanced_agents");
   const b = await parseBody(req, Proposal);
   return ok(await proposeExperiment({ ...b, companyId: id, actor: user.email }), { status: 201 });
 });

@@ -12,7 +12,8 @@ function Form({ mode }: { mode: "login" | "register" }) {
   const params = useSearchParams();
   const next = params.get("next");
   const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/app";
-  const [email, setEmail] = useState("");
+  const plan = params.get("plan");
+  const [email, setEmail] = useState(params.get("email") ?? "");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +32,8 @@ function Form({ mode }: { mode: "login" | "register" }) {
       const json = await res.json();
       if (!json.ok) throw new Error(json.error ?? "Request failed");
       // New accounts go straight into onboarding to create their first workspace and product.
-      router.push(mode === "register" && !next ? "/onboarding" : safeNext);
+      // A plan chosen on the pricing page is carried through onboarding to checkout.
+      router.push(mode === "register" && !next ? `/onboarding${plan && /^(pro|team)$/.test(plan) ? `?plan=${plan}` : ""}` : safeNext);
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -67,12 +69,12 @@ function Form({ mode }: { mode: "login" | "register" }) {
               className="input"
               autoComplete={isLogin ? "current-password" : "new-password"}
               required
-              minLength={isLogin ? 1 : 8}
+              minLength={isLogin ? 1 : 10}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               aria-describedby={!isLogin ? "pw-hint" : undefined}
             />
-            {!isLogin && <p id="pw-hint" className="mt-1 text-2xs text-text-faint">At least 8 characters.</p>}
+            {!isLogin && <p id="pw-hint" className="mt-1 text-2xs text-text-faint">At least 10 characters.</p>}
             {isLogin && <Link href="/forgot-password" className="mt-1 inline-block text-2xs text-text-muted underline decoration-border-strong underline-offset-2 hover:text-text">Forgot password?</Link>}
           </div>
           {error && (

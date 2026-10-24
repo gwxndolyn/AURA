@@ -93,8 +93,19 @@ export async function readTreeFile(t: Tree, raw: string): Promise<string | null>
   }
 }
 
+/**
+ * Pipeline/policy files agents may read but never write or delete: CI workflows,
+ * AURA's own config, and git hooks. A generated change can therefore not alter
+ * the checks that judge it or the policy that governs it.
+ */
+const AGENT_READ_ONLY = [/^\.github\//, /^\.gitlab-ci\.ya?ml$/, /^\.circleci\//, /^\.aura(\/|\.|$)/, /^aura\.config\./, /^\.husky\//, /^\.claude\//];
+export function isAgentReadOnly(p: string) {
+  return AGENT_READ_ONLY.some((re) => re.test(p));
+}
+
 export async function writeTreeFile(t: Tree, raw: string, content: string) {
   const p = safePath(raw);
+  if (isAgentReadOnly(p)) throw new ApiError(`${p} is pipeline/policy configuration; agents may not change it`, 422);
   if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) throw new ApiError(`File exceeds ${MAX_FILE_BYTES / 1024} KB`, 422);
   await mkdir(dirname(join(t.dir, p)), { recursive: true });
   await writeFile(join(t.dir, p), content, "utf8");
@@ -103,6 +114,7 @@ export async function writeTreeFile(t: Tree, raw: string, content: string) {
 
 export async function deleteTreeFile(t: Tree, raw: string) {
   const p = safePath(raw);
+  if (isAgentReadOnly(p)) throw new ApiError(`${p} is pipeline/policy configuration; agents may not change it`, 422);
   await rm(join(t.dir, p), { force: true });
   return p;
 }

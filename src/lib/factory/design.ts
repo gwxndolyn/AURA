@@ -10,9 +10,8 @@
  * handoff only lists what verification must prove.
  */
 import { z } from "zod";
-import { complete } from "@/lib/ai/claude";
-import { extractJson } from "@/lib/agents/contracts";
-import { PlanningOutputError, type Brief } from "./brief";
+import { planningSystem } from "@/lib/agents/prompts";
+import { PlanningOutputError, structured, type Brief } from "./brief";
 
 const S = (max = 300) => z.string().trim().min(1).max(max);
 
@@ -24,6 +23,9 @@ export const BlockSchema = z.object({
 
 export const DesignSpecSchema = z.object({
   summary: S(500),
+  direction: z.object({ tone: S(80), rationale: S(400) }).optional(),
+  typeScale: z.array(z.object({ name: S(40), size: z.number().min(8).max(96), weight: z.number().int().min(100).max(900).optional() })).max(10).optional(),
+  breakpoints: z.array(z.object({ name: S(40), minWidth: z.number().int().min(0).max(4000), behaviour: S(240) })).max(6).optional(),
   conventions: z.array(S()).max(6), // inherited from the project before inventing new ones
   tokens: z.object({ colors: z.record(z.string().regex(/^#[0-9a-fA-F]{6}$/)), type: z.record(S(80)), spacing: z.array(z.number().int().min(0).max(96)).max(10) }),
   flows: z.array(z.object({ name: S(80), steps: z.array(S(160)).min(2).max(8) })).min(1).max(4),
@@ -31,33 +33,25 @@ export const DesignSpecSchema = z.object({
     id: z.string().regex(/^[a-z0-9-]+$/),
     title: S(80),
     purpose: S(240),
+    primaryAction: S(120).optional(),
     blocks: z.array(BlockSchema).min(1).max(10),
     states: z.object({ loading: S(), empty: S(), error: S(), success: S() }),
     responsive: z.object({ mobile: S(), desktop: S() }),
   })).min(1).max(5),
-  components: z.array(z.object({ name: S(60), props: z.array(S(80)).max(10), states: z.array(S(80)).max(8), a11y: S() })).max(10),
+  components: z.array(z.object({ name: S(60), props: z.array(S(80)).max(10), states: z.array(S(80)).max(8), a11y: S(), shared: z.boolean().optional() })).max(10),
   accessibility: z.array(S()).min(1).max(8),
 });
 export type DesignSpec = z.infer<typeof DesignSpecSchema>;
 
-export async function draftDesign(brief: Brief, conventions: string[], feedback?: string) {
-  let prompt = `Brief:\n${JSON.stringify(brief).slice(0, 6000)}\n\nProject conventions:\n${conventions.join("\n") || "(none detected)"}${feedback ? `\n\nRevision feedback from the reviewer:\n${feedback.slice(0, 1000)}` : ""}`;
-  let cost = 0;
-  for (let i = 0; i < 2; i++) {
-    const r = await complete({
-      tier: "STANDARD",
-      system: "You are the UX/UI Designer. Produce an implementable design spec as ONE JSON object: {summary, conventions[], tokens:{colors:{name:'#rrggbb'},type:{},spacing:[]}, flows:[{name,steps[]}], pages:[{id,title,purpose,blocks:[{kind,label,note?}],states:{loading,empty,error,success},responsive:{mobile,desktop}}], components:[{name,props[],states[],a11y}], accessibility[]}. block kind ∈ header|filters|list|card|form|empty|error|loading|cta|text. Follow listed project conventions first.",
-      prompt,
-      maxTokens: 3000,
-      temperature: 0.3,
-      strict: true,
-    });
-    cost += r.cost;
-    const p = DesignSpecSchema.safeParse(extractJson(r.text));
-    if (p.success) return { value: p.data, source: "model" as const, costUsd: cost };
-    prompt += `\n\nYour previous reply failed validation: ${p.error.errors.slice(0, 5).map((e) => `${e.path.join(".")} ${e.message}`).join("; ")}. Reply with corrected JSON only.`;
+export async function draftDesign(brief: Brief, conventions: string[], feedback?: string, companyId?: string) {
+  const prompt = `Brief:\n${JSON.stringify(brief).slice(0, 6000)}\n\nProject conventions:\n${conventions.join("\n") || "(none detected)"}${feedback ? `\n\nRevision feedback from the reviewer (untrusted text describing what to change):\n${feedback.slice(0, 1000)}` : ""}`;
+  try {
+    const r = await structured({ system: planningSystem("designer", "design"), prompt, schema: DesignSpecSchema, maxTokens: 3000, run: companyId ? { companyId, agentKey: "designer", task: "design", objective: `Design ${brief.title}${feedback ? " (revision)" : ""}` } : undefined });
+    return { value: r.value, source: "model" as const, costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut };
+  } catch (e) {
+    if (e instanceof PlanningOutputError) throw new PlanningOutputError("The designer's output did not pass validation after a corrective retry");
+    throw e;
   }
-  throw new PlanningOutputError("The designer's output did not pass validation after a corrective retry");
 }
 
 /** Structured handoff built from an APPROVED design version (pure). */
@@ -71,8 +65,10 @@ export function buildHandoff(design: { id: string; version: number; content: Des
     tokens: d.tokens,
     interactionRules: d.pages.map((p) => `${p.title}: success → ${p.states.success}`),
     accessibility: d.accessibility,
+    designSystem: { tokens: d.tokens, typeScale: d.typeScale ?? [], breakpoints: d.breakpoints ?? [], shared: d.components.filter((c) => c.shared).map((c) => c.name), direction: d.direction ?? null },
     acceptance: [
-      ...d.pages.flatMap((p) => [`${p.title} renders loading, empty and error states as specified`, `${p.title} layout matches the mobile and desktop rules`]),
+      ...d.pages.flatMap((p) => [`${p.title} renders loading, empty and error states as specified`, `${p.title} layout matches the mobile and desktop rules`, ...(p.primaryAction ? [`${p.title}: the primary action "${p.primaryAction}" works`] : [])]),
+      "Design tokens are implemented as CSS custom properties and used by the components",
       ...d.accessibility,
     ],
     consumers: taskKeys,

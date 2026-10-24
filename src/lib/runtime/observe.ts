@@ -69,8 +69,36 @@ export async function evaluateAlerts(companyId: string) {
   for (const g of await prisma.goal.findMany({ where: { companyId, status: { in: ["BUDGET_EXHAUSTED", "BLOCKED"] } }, take: 10 })) alerts.push({ key: `goal:${g.id}:${g.status}`, severity: "high", title: `Goal ${g.status.toLowerCase().replace("_", " ")}: ${g.title}`, detail: g.statusReason });
   const regress = await prisma.labExperiment.count({ where: { companyId, status: "REJECTED", finishedAt: { gte: new Date(now - 24 * 3600_000) } } });
   if (regress >= 3) alerts.push({ key: "repeated-regressions", severity: "medium", title: "Repeated rejected improvement experiments", detail: `${regress} experiments were rejected in 24 h (regressions or no benefit). Review the candidates before scheduling more cycles.` });
+  alerts.push(...(await commercialAlerts(companyId, now)));
   const keys = alerts.map((a) => `runtime:${a.key}`);
   for (const a of alerts) await prisma.notification.upsert({ where: { companyId_dedupeKey: { companyId, dedupeKey: `runtime:${a.key}` } }, create: { companyId, dedupeKey: `runtime:${a.key}`, kind: "intervention", severity: a.severity, title: a.title.slice(0, 200), body: a.detail.slice(0, 500), href: "/autopilot" }, update: { body: a.detail.slice(0, 500) } });
   await prisma.notification.deleteMany({ where: { companyId, dedupeKey: { startsWith: "runtime:", notIn: keys } } });
   return alerts;
+}
+
+/**
+ * Commercial alerts: quota warnings at 80%, abnormal spend (today's estimated
+ * AI cost > 3× the trailing 7-day daily average and > $1), repeated denied
+ * access (≥ 10 in an hour) and payment failures. Raised in-app for the
+ * workspace; platform-wide signals (webhook failures, dead jobs) are in
+ * /api/admin/overview and the structured logs.
+ */
+export async function commercialAlerts(companyId: string, now = Date.now()): Promise<Alert[]> {
+  const out: Alert[] = [];
+  const { effectivePlan, usageThisMonth } = await import("@/lib/billing/entitlements");
+  const { plan } = await effectivePlan(companyId);
+  const u = await usageThisMonth(companyId);
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { monthlyBudgetUsd: true } });
+  const aiLimit = Math.min(plan.limits.aiBudgetUsdPerMonth, company?.monthlyBudgetUsd ?? Infinity);
+  const near = (used: number, limit: number) => limit > 0 && used / limit >= 0.8;
+  if (near(u.aiCostUsd, aiLimit)) out.push({ key: "quota:ai", severity: u.aiCostUsd >= aiLimit ? "high" : "medium", title: u.aiCostUsd >= aiLimit ? "AI budget reached — runs are stopped" : "AI budget 80% used", detail: `$${u.aiCostUsd.toFixed(2)} of $${aiLimit.toFixed(2)} this month (estimated). Raise the spending cap or upgrade in Settings.` });
+  if (near(u.builds, plan.limits.buildsPerMonth)) out.push({ key: "quota:builds", severity: u.builds >= plan.limits.buildsPerMonth ? "high" : "medium", title: `Engineering runs ${Math.round((u.builds / plan.limits.buildsPerMonth) * 100)}% used`, detail: `${u.builds} of ${plan.limits.buildsPerMonth} on ${plan.name} this month.` });
+  if (near(u.sandboxMinutes, plan.limits.sandboxMinutesPerMonth)) out.push({ key: "quota:sandbox", severity: "medium", title: "Sandbox minutes 80% used", detail: `${Math.round(u.sandboxMinutes)} of ${plan.limits.sandboxMinutesPerMonth} min this month.` });
+  const dayStart = new Date(now - 24 * 3600_000);
+  const today = (await prisma.usageEvent.aggregate({ where: { companyId, metric: "ai_cost_usd", createdAt: { gte: dayStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0;
+  const week = (await prisma.usageEvent.aggregate({ where: { companyId, metric: "ai_cost_usd", createdAt: { gte: new Date(now - 8 * 86400_000), lt: dayStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0;
+  if (today > 1 && today > 3 * (week / 7)) out.push({ key: "cost-spike", severity: "high", title: "Unusual AI spend in the last 24 hours", detail: `$${today.toFixed(2)} in 24 h vs a 7-day average of $${(week / 7).toFixed(2)}/day (estimated). Check running goals and products.` });
+  const denied = await prisma.auditLog.count({ where: { companyId, outcome: "denied", createdAt: { gte: new Date(now - 3600_000) } } });
+  if (denied >= 10) out.push({ key: "denied-access", severity: "high", title: "Repeated denied access attempts", detail: `${denied} actions were refused by role checks in the last hour. Review Settings → Security.` });
+  return out;
 }

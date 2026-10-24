@@ -3,6 +3,7 @@ import type { Job } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { payloadOf } from "./queue";
 import { runBuild } from "@/lib/builder/engine";
+import { settle } from "@/lib/billing/entitlements";
 import { runPlanning } from "@/lib/factory/planning";
 import { runExperiment as runLabExperiment } from "@/lib/lab/lab";
 import { advanceGoal, createGoal, type GoalKind, type GoalMode, type GoalLimits } from "@/lib/runtime/goals";
@@ -30,6 +31,7 @@ export const HANDLERS: Record<string, Handler> = {
     const { buildId } = payloadOf<{ buildId: string }>(job);
     return onFinalFailure(job, () => runBuild(buildId, job.id), async (message) => {
       await prisma.build.updateMany({ where: { id: buildId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "BLOCKED", phase: "done", failure: `Stopped after ${job.attempts} attempt(s): ${message}`.slice(0, 2000), finishedAt: new Date() } });
+      await settle(`build:${buildId}`, "concurrent_build", null);
     });
   },
   // Lab experiments are long and deterministic; a failure leaves the experiment INTERRUPTED (re-runnable).

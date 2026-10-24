@@ -21,6 +21,39 @@ import { loadProduct } from "./store";
 export interface ScoreMetric { value: number | null; numerator: number; denominator: number; unit: string; formula: string; unavailable?: string }
 const m = (num: number, den: number, unit: string, formula: string, unavailable: string): ScoreMetric => ({ value: den ? num / den : null, numerator: num, denominator: den, unit, formula, ...(den ? {} : { unavailable }) });
 
+type B = { status: string; attempt: number; findings: string; criteria: string; browser?: string; orchestration?: string; itemKey: string };
+
+/**
+ * Product-quality metrics (V10 §13), all from recorded runs:
+ *   journeysPassed         browser journeys passed / attempted (not_run excluded, reported separately)
+ *   browserCleanRate       browser-verified runs with no blocking browser finding / browser-verified runs
+ *   accessibilityIssues    unlabeled-control findings across browser runs (count)
+ *   repairSuccess          runs that failed an attempt and then VERIFIED / runs that failed an attempt
+ *   criteriaMet            acceptance criteria 'met' / criteria assessed on verified runs
+ *   unsupportedClaims      'met' criteria whose evidence names no test/command/browser check (count)
+ *   securityFindings       security findings across runs (count)
+ */
+function productQuality(builds: B[], _items: unknown[]) {
+  const browser = builds.map((b) => parseJSON<{ status?: string; journeys?: { status: string }[]; findings?: { kind: string; blocking: boolean }[] }>(b.browser ?? "{}", {})).filter((r) => r.status && r.status !== "unavailable");
+  const journeys = browser.flatMap((r) => r.journeys ?? []);
+  const attempted = journeys.filter((j) => j.status !== "not_run");
+  const a11y = browser.flatMap((r) => r.findings ?? []).filter((f) => f.kind === "unlabeled_control").length;
+  const repaired = builds.filter((b) => b.attempt > 0 || parseJSON<{ attempts?: { passed: boolean }[] }>(b.orchestration ?? "{}", {}).attempts?.some((x) => !x.passed));
+  const crit = builds.filter((b) => b.status === "VERIFIED").flatMap((b) => parseJSON<{ status: string; evidence: string }[]>(b.criteria, []));
+  const met = crit.filter((c) => c.status === "met");
+  const unsupported = met.filter((c) => !/test|\.js|command|run|passes|passing|browser|journey|exit 0|assert/i.test(c.evidence)).length;
+  const sec = builds.flatMap((b) => parseJSON<{ source: string }[]>(b.findings, [])).filter((f) => f.source === "security").length;
+  return {
+    journeysPassed: m(attempted.filter((j) => j.status === "passed").length, attempted.length, "ratio", `browser journeys passed / attempted (${journeys.length - attempted.length} could not be attempted)`, "no browser journey was attempted (no UI change browser-verified, or browser automation unavailable)"),
+    browserCleanRate: m(browser.filter((r) => !(r.findings ?? []).some((f) => f.blocking)).length, browser.length, "ratio", "browser-verified runs without blocking findings / browser-verified runs", "no run was browser-verified"),
+    accessibilityIssues: { value: browser.length ? a11y : null, numerator: a11y, denominator: browser.length, unit: "count", formula: "unlabeled controls/fields found by browser verification", ...(browser.length ? {} : { unavailable: "no run was browser-verified" }) } as ScoreMetric,
+    repairSuccess: m(repaired.filter((b) => b.status === "VERIFIED").length, repaired.length, "ratio", "runs that failed at least one attempt and then verified / runs that failed at least one attempt", "no run needed a repair"),
+    criteriaMet: m(met.length, crit.length, "ratio", "acceptance criteria 'met' / criteria assessed on verified runs", "no verified run"),
+    unsupportedClaims: { value: crit.length ? unsupported : null, numerator: unsupported, denominator: met.length, unit: "count", formula: "'met' criteria whose evidence names no test, command or browser check", ...(crit.length ? {} : { unavailable: "no verified run" }) } as ScoreMetric,
+    securityFindings: { value: builds.length ? sec : null, numerator: sec, denominator: builds.length, unit: "count", formula: "security-review findings across runs", ...(builds.length ? {} : { unavailable: "no run" }) } as ScoreMetric,
+  };
+}
+
 export async function deliveryScorecard(companyId: string, productId: string) {
   const p = await loadProduct(companyId, productId);
   const [builds, items, deploys, defects, cost, gate] = await Promise.all([
@@ -64,6 +97,7 @@ export async function deliveryScorecard(companyId: string, productId: string) {
       costPerVerifiedTask: m(est, verifiedTasks, "usd (estimate)", "estimated model cost (provider-reported tokens × list price) / VERIFIED tasks", "no verified task"),
       timeToFirstUsableMin: firstDeploy ? { value: ((firstDeploy.finishedAt ?? firstDeploy.createdAt).getTime() - p.createdAt.getTime()) / 60_000, numerator: 1, denominator: 1, unit: "minutes", formula: "product created → first verified deployment" } : m(0, 0, "minutes", "product created → first verified deployment", "never deployed"),
       evidenceCoverage: m(verifiedTasks, settled, "ratio", "tasks VERIFIED with sandbox evidence / tasks settled", "no task settled"),
+      ...productQuality(builds, items),
     },
     gate: { implemented: gate.implemented, approvedForRelease: gate.approvedForRelease, deployed: gate.deployed },
   };

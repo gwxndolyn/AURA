@@ -82,3 +82,9 @@ export function hashString(s: string): number {
 export function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/** Collision-resistant id for rows whose id must be known before insert (cuid-like: lowercase, starts with a letter). */
+export function createId(): string {
+  const rand = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 18);
+  return `c${Date.now().toString(36)}${rand}`;
+}

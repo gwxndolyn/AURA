@@ -12,6 +12,9 @@
  */
 import { z } from "zod";
 import { complete } from "@/lib/ai/claude";
+import { prisma } from "@/lib/db";
+import { planningSystem, planningPromptRef, type TaskPromptId } from "@/lib/agents/prompts";
+import type { ModelTier } from "@/lib/types";
 import { extractJson } from "@/lib/agents/contracts";
 import { validateGraph } from "./lifecycle";
 
@@ -32,6 +35,11 @@ export const BriefSchema = z.object({
   risks: z.array(S()).max(8),
   questions: z.array(z.object({ text: S(), material: z.boolean(), default: S(300) })).max(6),
   milestones: z.array(z.object({ id: z.string().regex(/^M\d+$/), name: S(80), goal: S(300) })).min(1).max(4),
+  // V10 product framing (optional for backward compatibility with stored v1 briefs).
+  coreJourney: S(300).optional(),
+  valueProposition: S(300).optional(),
+  constraints: z.array(S(300)).max(10).optional(),
+  definitionOfDone: z.array(S(300)).max(8).optional(),
 });
 export type Brief = z.infer<typeof BriefSchema>;
 
@@ -120,11 +128,22 @@ export interface Drafted<T> { value: T; source: "model"; model: string; costUsd:
  * ProviderError (the planning job retries or fails honestly). There is no
  * template substitute in production.
  */
-export async function structured<T>(args: { system: string; prompt: string; schema: z.ZodType<T, z.ZodTypeDef, unknown>; extra?: (v: T) => string[]; maxTokens: number }): Promise<Drafted<T>> {
+export async function structured<T>(args: { system: string; prompt: string; schema: z.ZodType<T, z.ZodTypeDef, unknown>; extra?: (v: T) => string[]; maxTokens: number; tier?: ModelTier; run?: PlanningRun }): Promise<Drafted<T>> {
   let prompt = args.prompt;
-  const acc = { cost: 0, tin: 0, tout: 0, model: "" };
+  const acc = { cost: 0, tin: 0, tout: 0, model: "", ms: 0 };
+  const run = args.run ? await startPlanningRun(args.run) : null;
+  try {
+    const out = await attemptStructured();
+    await finishPlanningRun(run, { ...acc, status: "COMPLETED", summary: `valid output after ${out.attempts} attempt(s)` });
+    return out;
+  } catch (e) {
+    await finishPlanningRun(run, { ...acc, status: "FAILED", summary: (e as Error).message.slice(0, 500), failure: (e as { kind?: string }).kind ?? "error" });
+    throw e;
+  }
+  async function attemptStructured(): Promise<Drafted<T>> {
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const r = await complete({ tier: "STANDARD", system: args.system, prompt, maxTokens: args.maxTokens, temperature: 0.2, strict: true });
+    const r = await complete({ tier: args.tier ?? "STANDARD", system: args.system, prompt, maxTokens: args.maxTokens, temperature: 0.2, strict: true });
+    acc.ms += r.latencyMs ?? 0;
     acc.cost += r.cost;
     acc.tin += r.tokensIn;
     acc.tout += r.tokensOut;
@@ -135,6 +154,24 @@ export async function structured<T>(args: { system: string; prompt: string; sche
     prompt = `${args.prompt}\n\nYour previous reply was rejected by validation:\n${errs.join("\n")}\nReply again with ONE corrected JSON object only.`;
   }
   throw new PlanningOutputError("The model's plan did not pass validation after a corrective retry");
+  }
+}
+
+/** Who is planning, for the AgentRun record (planning calls are real agent work and appear in the office/timeline). */
+export interface PlanningRun { companyId: string; agentKey: "product-manager" | "designer" | "architect"; task: TaskPromptId; objective: string }
+
+async function startPlanningRun(r: PlanningRun) {
+  const agent = await prisma.agent.findUnique({ where: { companyId_key: { companyId: r.companyId, key: r.agentKey } }, select: { id: true } });
+  if (!agent) return null; // workspaces without provisioned agents still plan; nothing to attach the record to
+  const run = await prisma.agentRun.create({ data: { companyId: r.companyId, agentId: agent.id, objective: r.objective.slice(0, 500), model: "", tier: "STANDARD", status: "RUNNING", mode: "live", promptRef: planningPromptRef(r.agentKey, r.task) } });
+  await prisma.agent.update({ where: { id: agent.id }, data: { status: "WORKING", currentTask: r.objective.slice(0, 120) } });
+  return { runId: run.id, agentId: agent.id };
+}
+
+async function finishPlanningRun(h: { runId: string; agentId: string } | null, u: { cost: number; tin: number; tout: number; model: string; ms: number; status: string; summary: string; failure?: string }) {
+  if (!h) return;
+  await prisma.agentRun.update({ where: { id: h.runId }, data: { model: u.model, tokensIn: u.tin, tokensOut: u.tout, cost: u.cost, latencyMs: u.ms, usageSource: "provider", status: u.status, summary: u.summary, failureCategory: u.failure ?? null } }).catch(() => null);
+  await prisma.agent.update({ where: { id: h.agentId }, data: { status: "IDLE", currentTask: null, tokensIn: { increment: u.tin }, tokensOut: { increment: u.tout }, cost: { increment: u.cost } } }).catch(() => null);
 }
 
 export class PlanningOutputError extends Error {
@@ -142,18 +179,20 @@ export class PlanningOutputError extends Error {
   kind = "invalid_model_output";
 }
 
-export async function draftBrief(idea: string): Promise<Drafted<Brief>> {
+export async function draftBrief(idea: string, companyId?: string): Promise<Drafted<Brief>> {
   return structured({
-    system: "You are the Product Manager of an AI engineering team. Turn the idea into a concise, testable product brief for a web application. Use sensible reversible defaults and record each as an editable assumption; only flag a question as material if it changes scope, data handling, security, cost, architecture or UX. Reply with ONE JSON object matching the requested shape. No prose.",
+    system: planningSystem("product-manager", "brief"),
+    run: companyId ? { companyId, agentKey: "product-manager", task: "brief", objective: `Draft the product brief: ${idea.slice(0, 200)}` } : undefined,
     prompt: `Idea:\n${idea.slice(0, 2000)}\n\nShape: {title, problem, personas:[{name,needs[]}], outcomes[], functional:[{id:"FR-1",text}], nonFunctional:[{id:"NFR-1",text}], mvp[], outOfScope[], journeys:[{name,steps[]}], acceptance:[{id:"AC-1",text,measurable}], assumptions:[{id:"A-1",text,editable:true}], risks[], questions:[{text,material,default}], milestones:[{id:"M1",name,goal}]}`,
     schema: BriefSchema,
     maxTokens: 3000,
   });
 }
 
-export async function draftBacklog(brief: Brief, stackConventions: string): Promise<Drafted<BacklogDraft>> {
+export async function draftBacklog(brief: Brief, stackConventions: string, companyId?: string): Promise<Drafted<BacklogDraft>> {
   return structured({
-    system: "You are the Product Manager. Produce a SMALL initial backlog (≤3 epics, ≤12 tasks) for the MVP milestone only, for the given codebase conventions. Order work so each task is independently buildable and testable: data/API (BACKEND) before UI (FRONTEND) that depends on it. Every task needs concrete, testable acceptance criteria, dependencies (task keys), an effort ESTIMATE in points, a risk level, the files it will likely touch, and the brief requirement ids (FR-n / NFR-n / AC-n) it implements. Reply with ONE JSON object {epics:[{key:'E1',title,stories:[{key:'E1.S1',title,acceptance[],milestone:'M1',tasks:[{key:'E1.S1.T1',title,description,kind,acceptance[],dependsOn[],effort,risk,files[],requirements[]}]}]}]}. kind ∈ DESIGN|ARCHITECTURE|FRONTEND|BACKEND|DATA|TEST|DOCS. Include at most one DESIGN task.",
+    system: planningSystem("product-manager", "backlog"),
+    run: companyId ? { companyId, agentKey: "product-manager", task: "backlog", objective: `Plan the initial backlog for ${brief.title}` } : undefined,
     prompt: `# Codebase conventions\n${stackConventions}\n\n# Brief\n${JSON.stringify(brief).slice(0, 8000)}`,
     schema: BacklogDraftSchema,
     extra: (v) => validateBacklog(v, brief),

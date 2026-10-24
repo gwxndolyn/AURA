@@ -34,6 +34,11 @@ export async function loadProduct(companyId: string, productId: string) {
 }
 export type ProductRow = Awaited<ReturnType<typeof loadProduct>>;
 
+/** Archived products are read-only: anything that would start work or change them is refused. */
+export function assertNotArchived(p: { status: string }) {
+  if (p.status === "ARCHIVED") throw new ApiError("This product is archived (read-only). Restore it to continue work.", 409);
+}
+
 export function limitsOf(p: { limits: string }): Limits {
   return clampLimits(parseJSON<Partial<Limits>>(p.limits, {}));
 }
@@ -145,8 +150,8 @@ export async function planProduct(companyId: string, productId: string) {
   if (p.planningStatus === "READY" && (await prisma.productBrief.count({ where: { productId } }))) return { status: "already planned" };
   await prisma.product.update({ where: { id: p.id }, data: { planningStatus: "RUNNING", planningError: "" } });
   const stack = stackFor(p.stack);
-  const brief = await draftBrief(p.idea);
-  const backlog = await draftBacklog(brief.value, stack.conventions);
+  const brief = await draftBrief(p.idea, companyId);
+  const backlog = await draftBacklog(brief.value, stack.conventions, companyId);
   const existing = await prisma.productBrief.findFirst({ where: { productId }, orderBy: { version: "desc" } });
   const b = existing ?? (await prisma.productBrief.create({ data: { productId, companyId, version: 1, content: JSON.stringify(brief.value), source: "model", author: "product-manager", note: `${brief.model}; ${brief.attempts} attempt(s)` } }));
   await insertBacklog(p, backlog.value, "product-manager");

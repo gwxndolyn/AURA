@@ -57,6 +57,20 @@ The doc validator checks that everything in `.env.example` appears here.
 | `AURA_EVAL_TIMEOUT_MS` | Wall-clock cap per evaluation | `120000` | `intelligence/evaluation.ts` |
 | `PORT` | Dev/prod port | `3000` | Next.js |
 
+## Commercial and agent quality (V8–V10)
+
+| Variable | Purpose | Where |
+|---|---|---|
+| `AURA_SECRETS_KEY` | 32-byte key (base64 or hex) encrypting tenant secrets with AES-256-GCM. Without it customers cannot store deployment secrets. | `security/secrets.ts` |
+| `STRIPE_PRICE_PRO_YEARLY` / `STRIPE_PRICE_TEAM_YEARLY` | Annual Stripe price ids (optional; plans without one are monthly only) | `billing/plans.ts` |
+| `AURA_PLANS_FILE` | Alternative plan catalogue (shape of `config/plans.json`); validated at load | `billing/plans.ts` |
+| `AURA_TRUST_PROXY` | `1` = use the first `X-Forwarded-For` hop for rate limits (only behind your own proxy) | `auth/rateLimit.ts` |
+| `AURA_ALLOWED_ORIGINS` | Extra origins allowed to send state-changing `/api` requests (CSRF check) | `auth/csrf.ts` |
+| `AURA_DEPLOY_ENV_ALLOWLIST` | Single-tenant self-hosting: server env names deployments may read (default none — tenant secrets only) | `deploy/service.ts` |
+| `AURA_BROWSER_VERIFY` | `0` disables browser verification (reported as not run) | `builder/browser.ts` |
+| `AURA_EVIDENCE_ROOT` | Directory for browser screenshots (default OS temp) | `builder/browser.ts` |
+| `AURA_MAINTENANCE_INTERVAL_MS` | Worker maintenance tick (retention, quota-hold recovery, token purge); default 15 min | `jobs/worker.ts` |
+
 ## Named by configuration (you choose the names)
 
 | Variable | Purpose | Where |

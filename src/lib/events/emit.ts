@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { publish } from "./bus";
 import type { EventType, LiveEvent } from "@/lib/types";
 import { getAgentDef } from "@/lib/agents/definitions";
+import { redactText, redactValue } from "@/lib/security/redact";
 
 interface EmitInput {
   companyId: string;
@@ -83,9 +84,38 @@ export async function emitOpsEvent(input: Omit<EmitInput, "ops"> & { ops: OpsFie
   return emitEvent(input);
 }
 
-/** Append an immutable audit log entry. */
-export async function audit(companyId: string, actor: string, action: string, target: string, result: string) {
+export const AUDIT_CATEGORIES = ["security", "membership", "billing", "integration", "execution", "deployment", "secret", "data", "activity"] as const;
+export type AuditCategory = (typeof AUDIT_CATEGORIES)[number];
+
+/** Category from the action name, so the 90+ existing call sites are classified without changes. */
+export function auditCategory(action: string): AuditCategory {
+  const a = action.toUpperCase();
+  if (/^(LOGIN|LOGOUT|SESSION|PASSWORD|EMAIL_VERIF|ACCESS_DENIED|AUTH)/.test(a)) return "security";
+  if (/(MEMBER|INVITE|INVITATION|ROLE|OWNERSHIP)/.test(a)) return "membership";
+  if (/(BILLING|SUBSCRIPTION|CHECKOUT|PLAN_|INVOICE|SPEND)/.test(a)) return "billing";
+  if (/SECRET/.test(a)) return "secret";
+  if (/(GITHUB|INTEGRATION|WEBHOOK|PROVIDER)/.test(a)) return "integration";
+  if (/(DEPLOY|ROLLBACK|RELEASE)/.test(a)) return "deployment";
+  if (/(EXPORT|DELET|ARCHIV|RESTOR|RETENTION|PURGE)/.test(a)) return "data";
+  if (/(BUILD|RUN|MISSION|GOAL|JOB|PRODUCT_(PAUSE|RESUME|CANCEL)|APPROVAL|EXECUT)/.test(a)) return "execution";
+  return "activity";
+}
+
+/**
+ * Append an immutable audit log entry. Text is redacted (no secret values ever
+ * reach the audit trail). Rows are never updated or deleted by application code.
+ */
+export async function audit(companyId: string, actor: string, action: string, target: string, result: string, opts: { outcome?: "success" | "denied" | "failure"; category?: AuditCategory; meta?: Record<string, unknown> } = {}) {
   await prisma.auditLog.create({
-    data: { companyId, actor, action, target, result },
+    data: {
+      companyId,
+      actor: redactText(actor).slice(0, 200),
+      action: action.slice(0, 80),
+      target: redactText(target).slice(0, 300),
+      result: redactText(result).slice(0, 1000),
+      category: opts.category ?? auditCategory(action),
+      outcome: opts.outcome ?? "success",
+      meta: JSON.stringify(redactValue(opts.meta ?? {})).slice(0, 4000),
+    },
   });
 }

@@ -30,7 +30,7 @@ import { resolveAgentPrompt } from "@/lib/intelligence/registry";
 import { emitEvent } from "@/lib/events/emit";
 import { JobError, isCancelled } from "@/lib/jobs/queue";
 import { log } from "@/lib/observability/log";
-import { recordUsage, remainingAiBudget } from "@/lib/billing/entitlements";
+import { recordUsage, remainingAiBudget, settle } from "@/lib/billing/entitlements";
 import { z } from "zod";
 import { openTree, closeTree, listTree, readTreeFile, changedFiles, diffText, commitAndPush, git, type Tree } from "./workspace";
 import { verificationPlan, parseTestSummary } from "./detect";
@@ -45,9 +45,12 @@ import { remember, retrieve, renderMemory, markStale } from "@/lib/factory/memor
 import type { ModelTier } from "@/lib/types";
 import { clampLimits, type Limits } from "@/lib/factory/policy";
 import { integrationBase } from "@/lib/factory/base";
+import { verifyInBrowser, evidenceRoot, browserBrief, type BrowserResult } from "./browser";
+import { join } from "node:path";
+import { assessRisk, reviewPlan, handoffFor, recoveryFor, resolveDisagreement, contextPackage, type ReviewPlan, type ReviewOutcome } from "./orchestrator";
 
 type BuildRow = NonNullable<Awaited<ReturnType<typeof prisma.build.findFirst>>>;
-export interface Finding { source: "qa" | "security" | "review" | "verification" | "impact"; severity: "low" | "medium" | "high" | "critical"; title: string; detail: string; evidence: string; blocking: boolean }
+export interface Finding { source: "qa" | "security" | "review" | "verification" | "impact" | "browser"; severity: "low" | "medium" | "high" | "critical"; title: string; detail: string; evidence: string; blocking: boolean }
 export interface Criterion { text: string; status: "met" | "not_met" | "unverified"; evidence: string }
 
 const OWNER_TOOLS = ["fs.list", "fs.read", "fs.write", "fs.delete", "cmd.run"];
@@ -75,6 +78,19 @@ async function checkpoint(b: BuildRow, jobId: string | null) {
  * recurred; the code reviewer of a LOW-risk change uses FAST. QA's criterion
  * judgement and security review keep their configured tier.
  */
+/** The contract's definition (evidence and fingerprint omitted: they are not instructions). */
+function contractText(raw: string) {
+  const c = parseJSON<Record<string, unknown>>(raw, {});
+  delete c.evidence;
+  delete c.fingerprint;
+  return JSON.stringify(c).slice(0, 5000);
+}
+
+/** UI-visible change: browser verification applies (FRONTEND work or any change to served pages/assets). */
+export function uiVisible(kind: string, changed: string[]) {
+  return kind === "FRONTEND" || changed.some((p) => /^public\//.test(p) || /\.(html|css|jsx|tsx|vue|svelte)$/.test(p));
+}
+
 export function tierFor(agentKey: string, base: ModelTier, ctx: { risk: string; escalate?: boolean }): ModelTier {
   if (agentKey.endsWith("-engineer") && agentKey !== "qa-engineer" && agentKey !== "security-engineer" && (ctx.risk === "HIGH" || ctx.escalate)) return "REASONING";
   if (agentKey === "reviewer" && ctx.risk === "LOW") return "FAST";
@@ -98,7 +114,8 @@ async function agentTurn(b: BuildRow, args: { agentKey: string; objective: strin
   if (!agent) throw new JobError(`Agent ${args.agentKey} is not provisioned in this workspace`, false, "config");
   const prompt = await resolveAgentPrompt(b.companyId, args.agentKey);
   const tier = args.tier ?? def.tier;
-  const run = await prisma.agentRun.create({ data: { companyId: b.companyId, agentId: agent.id, objective: args.objective.slice(0, 500), model: "", tier, status: "RUNNING", mode: "live", promptRef: prompt.promptRef, promptVersionId: prompt.promptVersionId } });
+  // The objective is prefixed with the build id so live views (office, timeline) can attribute the turn to its run.
+  const run = await prisma.agentRun.create({ data: { companyId: b.companyId, agentId: agent.id, objective: `[build ${b.id}] ${args.objective}`.slice(0, 500), model: "", tier, status: "RUNNING", mode: "live", promptRef: prompt.promptRef, promptVersionId: prompt.promptVersionId } });
   await prisma.agent.update({ where: { id: agent.id }, data: { status: "WORKING", currentTask: `${b.itemKey}: ${args.objective.slice(0, 80)}` } });
   const touched = new Set<string>();
   const env = { companyId: b.companyId, buildId: b.id, agentKey: args.agentKey, runId: run.id, tree: args.tree, writeScope: args.writeScope, touched };
@@ -123,7 +140,7 @@ async function agentTurn(b: BuildRow, args: { agentKey: string; objective: strin
     await prisma.agentRun.update({ where: { id: run.id }, data: { model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, cost: r.cost, latencyMs: r.latencyMs, usageSource: "provider", status: r.stopReason === "end_turn" ? "COMPLETED" : "FAILED", failureCategory: r.stopReason === "end_turn" ? null : r.stopReason, summary: r.text.slice(0, 1500) } });
     await prisma.agent.update({ where: { id: agent.id }, data: { status: "IDLE", currentTask: null, tokensIn: { increment: r.tokensIn }, tokensOut: { increment: r.tokensOut }, cost: { increment: r.cost } } });
     await update(b, { tokensIn: b.tokensIn + r.tokensIn, tokensOut: b.tokensOut + r.tokensOut, costUsd: b.costUsd + r.cost, modelCalls: b.modelCalls + r.turns, toolCalls: b.toolCalls + r.toolCalls });
-    await recordUsage(b.companyId, [{ metric: "ai_tokens_in", quantity: r.tokensIn }, { metric: "ai_tokens_out", quantity: r.tokensOut }, { metric: "ai_cost_usd", quantity: r.cost }], `agent_run:${run.id}`);
+    await recordUsage(b.companyId, [{ metric: "ai_tokens_in", quantity: r.tokensIn, model: r.model }, { metric: "ai_tokens_out", quantity: r.tokensOut, model: r.model }, { metric: "ai_cost_usd", quantity: r.cost, model: r.model, basis: "estimated" }], `agent_run:${run.id}`, { productId: b.productId });
     if (r.stopReason === "cancelled") throw new JobError("Cancelled by the user", false, "cancelled");
     if (r.stopReason === "budget") throw new JobError(`Budget reached during the run (est. $${b.costUsd.toFixed(4)} of $${b.budgetUsd.toFixed(2)} for this run, or the product/monthly limit) — work so far is kept on the branch`, false, "budget");
     return { text: r.text, touched: [...touched], runId: run.id, stopReason: r.stopReason };
@@ -162,36 +179,59 @@ async function verify(b: BuildRow, tree: Tree, focused: string | null = null) {
     if (c.id === "install" && !r.ok) break; // nothing else can run
   }
   const hasTest = results.some((r) => r.id === "test");
-  return { results, notes: plan.notes, passed: hasTest && results.every((r) => r.ok), hasTest };
+  return { results, notes: [...plan.notes], passed: hasTest && results.every((r) => r.ok), hasTest, browserEvidence: "" as string };
 }
 
 const ReviewSchema = z.object({
-  criteria: z.array(z.object({ text: z.string(), status: z.enum(["met", "not_met", "unverified"]), evidence: z.string().max(600) })),
-  findings: z.array(z.object({ severity: z.enum(["low", "medium", "high", "critical"]), title: z.string().max(200), detail: z.string().max(800), evidence: z.string().max(600), blocking: z.boolean() })).max(15),
+  verdict: z.enum(["approve", "request_changes"]).optional(),
+  criteria: z.array(z.object({ text: z.string(), status: z.enum(["met", "not_met", "unverified"]), evidence: z.string().max(600) })).default([]),
+  findings: z.array(z.object({ severity: z.enum(["low", "medium", "high", "critical"]), title: z.string().max(200), detail: z.string().max(800), evidence: z.string().max(600), blocking: z.boolean() })).max(15).default([]),
+  confidence: z.enum(["low", "medium", "high"]).optional(),
+  notVerified: z.array(z.string().max(300)).max(10).optional(),
 });
 
-/** QA / security / code review: read-only agents judging the real code + real command output. */
-async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaited<ReturnType<typeof verify>>, impact: Impact | null, risk: string) {
+const ASKS: Record<string, ["qa" | "security" | "review", string]> = {
+  "qa-engineer": ["qa", "For EACH acceptance criterion decide met / not_met / unverified. 'met' requires evidence: a passing test that exercises it (name it) or code you read (file + what it does). If no executed test covers it, say 'unverified'. Report defects as findings."],
+  "security-engineer": ["security", "Review the change for authentication/authorization gaps, injection, unsafe input handling, secrets in code, path traversal and dependency risks. Only report issues you can point to in the code (file + line or snippet). Do not report speculative issues as blocking."],
+  reviewer: ["review", "Review correctness, completeness against the acceptance criteria, and maintainability. Blocking only for defects you can demonstrate from the code or the command output."],
+};
+
+/**
+ * Independent review by read-only agents judging the real code + real command
+ * output. Which reviewers participate is decided by the orchestrator's risk
+ * plan. Each reviewer gets ONE corrective retry if its output is not valid
+ * JSON; for HIGH-risk work a reviewer without a valid verdict blocks (no
+ * implicit approval). Disagreements are resolved on evidence, never on
+ * confidence, and recorded.
+ */
+async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaited<ReturnType<typeof verify>>, impact: Impact | null, risk: string, plan: ReviewPlan) {
   const diff = await diffText(tree);
   const evidence = ver.results.map((r) => `$ ${r.command}\nexit ${r.exitCode} — ${r.summary}\n${r.output.slice(-2500)}`).join("\n\n");
   const imp = impact ? `\n\n# Static change-impact analysis (${impact.parser} parser; file-level)\nDependents: ${impact.dependents.join(", ") || "none"}\nTests covering the change: ${impact.tests.join(", ") || "none"}\n${impact.flags.map((f) => `- [${f.confidence}/${f.severity}] ${f.kind}: ${f.detail}`).join("\n") || "No risks flagged."}` : "";
-  const base = `# Acceptance criteria\n${acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n\n# Diff vs base\n${diff.slice(0, 60_000)}\n\n# Verification output (executed in the sandbox by the engine)\n${evidence.slice(0, 20_000)}${imp}`;
+  const base = `# Acceptance criteria\n${acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n\n# Diff vs base\n${diff.slice(0, 60_000)}\n\n# Verification output (executed in the sandbox by the engine)\n${evidence.slice(0, 20_000)}${imp}${ver.browserEvidence ?? ""}`;
   const findings: Finding[] = [];
+  const outcomes: ReviewOutcome[] = [];
   let criteria: Criterion[] = acceptance.map((text) => ({ text, status: "unverified", evidence: "not reviewed" }));
-  for (const [agentKey, source, ask] of [
-    ["qa-engineer", "qa", "For EACH acceptance criterion decide met / not_met / unverified. 'met' requires evidence: a passing test that exercises it (name it) or code you read (file + what it does). If no executed test covers it, say 'unverified'. Report defects as findings."],
-    ["security-engineer", "security", "Review the change for authentication/authorization gaps, injection, unsafe input handling, secrets in code, path traversal and dependency risks. Only report issues you can point to in the code (file + line or snippet). Do not report speculative issues as blocking."],
-    ["reviewer", "review", "Review correctness, completeness against the acceptance criteria, and maintainability. Blocking only for defects you can demonstrate from the code or the command output."],
-  ] as const) {
+  for (const agentKey of plan.reviewers) {
+    const [source, ask] = ASKS[agentKey];
     await checkpoint(b, b.jobId);
     await event(b, `${getAgentDef(agentKey)?.name ?? agentKey} is reviewing ${b.itemKey}`, "info", agentKey);
-    const r = await agentTurn(b, { agentKey, tier: tierFor(agentKey, getAgentDef(agentKey)?.tier ?? "STANDARD", { risk }), objective: `${ask}\n\nYou may read files with the tools. Finish with ONE JSON object: {"criteria":[{"text","status","evidence"}],"findings":[{"severity","title","detail","evidence","blocking"}]}${source === "qa" ? "" : ' (criteria may be [])'}.`, context: base, tools: READ_TOOLS, writeScope: [], tree, maxTurns: 12, jobId: b.jobId });
-    const parsed = ReviewSchema.safeParse(extractJson(r.text));
+    const objective = `${ask}\n\nYou may read files with the tools. Finish with ONE JSON object: {"verdict":"approve"|"request_changes","criteria":[{"text","status","evidence"}],"findings":[{"severity","title","detail","evidence","blocking"}],"confidence","notVerified":[]}${source === "qa" ? "" : ' (criteria may be [])'}.`;
+    let r = await agentTurn(b, { agentKey, tier: tierFor(agentKey, getAgentDef(agentKey)?.tier ?? "STANDARD", { risk }), objective, context: base, tools: READ_TOOLS, writeScope: [], tree, maxTurns: 12, jobId: b.jobId });
+    let parsed = ReviewSchema.safeParse(extractJson(r.text));
     if (!parsed.success) {
-      findings.push({ source: source as Finding["source"], severity: "low", title: `${source} review output was not valid`, detail: "The review could not be parsed; its conclusions are not used.", evidence: parsed.error.errors.slice(0, 2).map((e) => e.message).join("; "), blocking: false });
+      // One corrective retry: an unparseable review is never silently treated as "no findings".
+      r = await agentTurn(b, { agentKey, tier: tierFor(agentKey, getAgentDef(agentKey)?.tier ?? "STANDARD", { risk }), objective: `${objective}\n\nYour previous reply could not be parsed (${parsed.error.errors.slice(0, 2).map((e) => `${e.path.join(".")}: ${e.message}`).join("; ")}). Reply with the JSON object only.`, context: base, tools: READ_TOOLS, writeScope: [], tree, maxTurns: 4, jobId: b.jobId });
+      parsed = ReviewSchema.safeParse(extractJson(r.text));
+    }
+    if (!parsed.success) {
+      findings.push({ source, severity: plan.requireApproveVerdict ? "high" : "low", title: `${source} review output was not valid`, detail: plan.requireApproveVerdict ? "High-risk change: a valid verdict from every reviewer is required; this review could not be parsed after a corrective retry." : "The review could not be parsed after a corrective retry; its conclusions are not used.", evidence: parsed.error.errors.slice(0, 2).map((e) => e.message).join("; "), blocking: false });
+      outcomes.push({ source, verdict: "missing", blocking: [] });
       continue;
     }
-    for (const f of parsed.data.findings) findings.push({ ...f, source: source as Finding["source"], blocking: f.blocking && !!f.evidence.trim() });
+    const own = parsed.data.findings.map((f) => ({ ...f, source, blocking: f.blocking && !!f.evidence.trim() }));
+    findings.push(...own);
+    outcomes.push({ source, verdict: parsed.data.verdict ?? (own.some((f) => f.blocking) ? "request_changes" : "approve"), blocking: own.filter((f) => f.blocking).map((f) => ({ title: f.title, evidence: f.evidence })) });
     if (source === "qa") {
       criteria = acceptance.map((text, i) => {
         const c = parsed.data.criteria[i] ?? parsed.data.criteria.find((x) => x.text.trim() === text.trim());
@@ -202,7 +242,9 @@ async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaite
       });
     }
   }
-  return { criteria, findings };
+  const decision = resolveDisagreement(outcomes, { requireApproveVerdict: plan.requireApproveVerdict });
+  if (decision.block && !findings.some((f) => f.blocking)) findings.push({ source: "review", severity: "high", title: "Required review verdict missing", detail: decision.rationale, evidence: "orchestrator review policy", blocking: true });
+  return { criteria, findings, decision, outcomes: outcomes.map((o) => ({ source: o.source, verdict: o.verdict, blocking: o.blocking.length })) };
 }
 
 function repoContext(stackConventions: string, snap: { files: string[]; contents: Record<string, string> }) {
@@ -242,7 +284,17 @@ async function treeHash(tree: Tree) {
   return git(tree.dir, ["write-tree"]);
 }
 
+/** Runs the build; whenever it ends in a terminal state its concurrency slot is released (quota never leaks). */
 export async function runBuild(buildId: string, jobId: string | null) {
+  try {
+    return await runBuildInner(buildId, jobId);
+  } finally {
+    const s = await prisma.build.findUnique({ where: { id: buildId }, select: { status: true } });
+    if (!s || !["QUEUED", "RUNNING"].includes(s.status)) await settle(`build:${buildId}`, "concurrent_build", null).catch(() => null);
+  }
+}
+
+async function runBuildInner(buildId: string, jobId: string | null) {
   const b = await prisma.build.findUnique({ where: { id: buildId } });
   if (!b) throw new JobError("Build not found", false, "missing");
   if (["VERIFIED", "CANCELLED", "FAILED"].includes(b.status)) return { status: b.status }; // duplicate delivery of a finished job: no side effects
@@ -260,15 +312,44 @@ export async function runBuild(buildId: string, jobId: string | null) {
   const tree = await openTree(b.companyId, repo.id, b.id, base.branch, b.branch);
   try {
     await update(b, { baseSha: tree.baseSha });
+    // Dependent work builds ON its dependencies: verified branches of the tasks this one depends on are merged
+    // into the working tree first (real git merge; a conflict blocks the run instead of silently dropping work).
+    const deps = parseJSON<string[]>(item.dependsOn, []);
+    if (deps.length) {
+      const depItems = await prisma.backlogItem.findMany({ where: { productId: product.id, companyId: b.companyId, key: { in: deps }, status: "VERIFIED", buildId: { not: null } }, select: { key: true, buildId: true } });
+      const depBuilds = await prisma.build.findMany({ where: { id: { in: depItems.map((d) => d.buildId!) }, companyId: b.companyId, status: "VERIFIED" }, select: { branch: true, itemKey: true } });
+      for (const d of depBuilds) {
+        const already = await git(tree.dir, ["merge-base", "--is-ancestor", `origin/${d.branch}`, "HEAD"]).then(() => true).catch(() => false);
+        if (already) continue;
+        try {
+          await git(tree.dir, ["-c", "user.name=AURA", "-c", "user.email=aura@localhost", "merge", "--no-ff", "--quiet", "-m", `Merge verified dependency ${d.itemKey} (${d.branch})`, `origin/${d.branch}`]);
+        } catch (e) {
+          await git(tree.dir, ["merge", "--abort"]).catch(() => null);
+          throw new JobError(`Verified dependency ${d.itemKey} (${d.branch}) conflicts with ${b.branch}; both versions are preserved on their branches — a person must reconcile them. ${(e as Error).message.slice(0, 200)}`, false, "merge_conflict");
+        }
+      }
+    }
     const stack = stackFor(product.stack);
     const acceptance = parseJSON<string[]>(item.acceptance, []);
     const requirements = parseJSON<string[]>(item.requirements, []);
     const scope = parseJSON<string[]>(item.files, []);
     const owner = parseJSON<string[]>(item.capabilities, [])[0] ?? "backend-engineer";
     const ownerTier = getAgentDef(owner)?.tier ?? "STANDARD";
+    // Engineers may write in the project except protected secrets and pipeline/policy files (enforced in
+    // workspace.ts writeTreeFile — a generated change cannot alter its own checks); QA writes test files only.
     const writeScope = owner === "qa-engineer" ? ["**/*.test.js", "**/*.test.ts", "test/**", "tests/**"] : ["**"];
     const brief = await prisma.productBrief.findFirst({ where: { productId: product.id }, orderBy: { version: "desc" } });
-    const handoff = await prisma.productArtifact.findFirst({ where: { productId: product.id, kind: "HANDOFF", status: "APPROVED" }, orderBy: { version: "desc" } });
+    // Chief-orchestrator decisions for this task: effective risk, review plan, gate policy, input contracts.
+    const assessed = assessRisk({ risk: item.risk, title: item.title, description: item.description, acceptance, files: scope });
+    const plan = reviewPlan(assessed.risk, assessed.reasons);
+    const gatePolicyId = process.env.AURA_GATE_POLICY && GATE_POLICIES[process.env.AURA_GATE_POLICY] ? process.env.AURA_GATE_POLICY : assessed.risk === "HIGH" ? "v3" : DEFAULT_GATE_POLICY;
+    const upstream = await prisma.productArtifact.findMany({ where: { productId: product.id, companyId: b.companyId, kind: { in: ["HANDOFF", "ARCHITECTURE"] }, status: "APPROVED" }, select: { id: true, kind: true, version: true, content: true, consumedBy: true } });
+    const contract = item.parentKey ? await prisma.productArtifact.findFirst({ where: { productId: product.id, companyId: b.companyId, kind: "FEATURE_CONTRACT", status: "APPROVED", title: { startsWith: `Feature ${item.parentKey}:` } }, orderBy: { version: "desc" } }) : null;
+    const inputs = handoffFor(item.key, item.parentKey, upstream);
+    // QA verifies the task's own criteria AND the design/contract lines addressed to it.
+    const verifyCriteria = [...acceptance, ...inputs.extraAcceptance.filter((x) => !acceptance.includes(x))];
+    const orchestration: Record<string, unknown> = { risk: assessed.risk, plannedRisk: item.risk, riskReasons: assessed.reasons, reviewers: plan.reviewers, requireApproveVerdict: plan.requireApproveVerdict, reviewPolicy: plan.why, gatePolicy: gatePolicyId, inputs: { design: inputs.design?.ref ?? null, architecture: inputs.architecture?.ref ?? null, extraCriteria: inputs.extraAcceptance.length }, attempts: [] as unknown[] };
+    await update(b, { orchestration: JSON.stringify(orchestration) });
     // Codebase intelligence for the starting point of this run (persisted per commit, reused across runs).
     const baseFiles = await allFiles(tree);
     const before = await indexSnapshot(b.companyId, repo.id, tree.baseSha, baseFiles);
@@ -284,17 +365,22 @@ export async function runBuild(buildId: string, jobId: string | null) {
       await update(b, { attempt, phase: attempt === 0 ? "implement" : "repair" });
       const snap = await snapshot(tree);
       const memory = renderMemory(await retrieve(b.companyId, product.id, { files: scope, requirements, signatures: openSigs, text: `${item.title} ${item.description}` }));
-      const ctx = [
-        `# Product\n${product.title}\n${product.idea}`,
-        brief ? `# Brief (v${brief.version})\n${brief.content.slice(0, 6000)}` : "",
-        handoff ? `# Approved design handoff\n${handoff.content.slice(0, 5000)}` : "",
-        `# Task ${item.key}: ${item.title}\n${item.description}\n\nAcceptance criteria:\n${acceptance.map((a) => `- ${a}`).join("\n")}${requirements.length ? `\nImplements requirements: ${requirements.join(", ")}` : ""}`,
-        repoContext(stack.conventions, snap),
-        relevantContext(before, baseFiles, `${item.title} ${item.description} ${acceptance.join(" ")} ${scope.join(" ")}`),
-        `# Code map (static index, ${before.parser} parser)\nRoutes: ${before.routes.map((r) => `${r.method} ${r.path} → ${r.file}`).join("; ") || "none"}\nTests: ${before.tests.map((t) => t.file).join(", ") || "none"}`,
-        memory,
-        feedback ? `# What failed last time (real output and evidence — fix the cause, do not weaken or delete existing tests)\n${feedback}` : "",
-      ].filter(Boolean).join("\n\n");
+      // Task-specific context package; every section carries provenance (recorded on the run).
+      const pkg = contextPackage([
+        { id: "product", title: "Product", body: `${product.title}\n${product.idea}`, provenance: `product ${product.id} (user request)` },
+        brief && { id: "brief", title: `Brief (v${brief.version})`, body: brief.content.slice(0, 6000), provenance: `ProductBrief v${brief.version}` },
+        inputs.architecture && { id: "architecture", title: "Approved architecture contracts (binding — raise a conflict instead of diverging)", body: inputs.architecture.text, provenance: inputs.architecture.ref },
+        !!contract && { id: "contract", title: `Feature contract ${item.parentKey} v${contract.version} (shared by PM, design, engineering and QA — do not diverge)`, body: contractText(contract.content), provenance: `FEATURE_CONTRACT ${contract.id.slice(-6)} v${contract.version}` },
+        inputs.design && { id: "design", title: "Approved design handoff (binding for UI work)", body: inputs.design.text, provenance: inputs.design.ref },
+        { id: "task", title: `Task ${item.key}: ${item.title}`, body: `${item.description}\n\nAcceptance criteria (QA verifies each from executed evidence):\n${verifyCriteria.map((a) => `- ${a}`).join("\n")}${requirements.length ? `\nImplements requirements: ${requirements.join(", ")}` : ""}\nRisk: ${assessed.risk}${assessed.reasons.length ? ` (${assessed.reasons.join(", ")})` : ""}. Review: ${plan.why}.${scope.length ? `\nPlanned files: ${scope.join(", ")} — stay close to them; explain any other file you change.` : ""}`, provenance: `BacklogItem ${item.key}` },
+        { id: "repo", title: "Repository", body: repoContext(stack.conventions, snap), provenance: `working tree of ${b.branch} (live files)` },
+        { id: "relevant", title: "Relevant files", body: relevantContext(before, baseFiles, `${item.title} ${item.description} ${acceptance.join(" ")} ${scope.join(" ")}`), provenance: `code index @ ${tree.baseSha.slice(0, 8)} (current source)` },
+        { id: "codemap", title: `Code map (static index, ${before.parser} parser)`, body: `Routes: ${before.routes.map((r) => `${r.method} ${r.path} → ${r.file}`).join("; ") || "none"}\nTests: ${before.tests.map((t) => t.file).join(", ") || "none"}`, provenance: `code index @ ${tree.baseSha.slice(0, 8)}` },
+        !!memory && { id: "memory", title: "Project memory", body: memory.replace(/^# [^\n]*\n/, ""), provenance: "ProjectMemory (VERIFIED entries are facts from passing runs; ASSUMPTION entries are not)" },
+        !!feedback && { id: "feedback", title: "What failed last time (real output and evidence — fix the cause, do not weaken or delete existing tests)", body: feedback, provenance: `attempt ${attempt} verification + review of build ${b.id.slice(-6)}` },
+      ]);
+      const ctx = pkg.text;
+      await update(b, { contextManifest: JSON.stringify(pkg.manifest) });
       const tier = tierFor(owner, ownerTier, { risk: item.risk, escalate });
       await event(b, attempt === 0 ? `${getAgentDef(owner)?.name ?? owner} is implementing ${b.itemKey}` : `${getAgentDef(owner)?.name ?? owner} is repairing ${b.itemKey} (attempt ${attempt + 1}${escalate ? `, escalated to the ${tier} model` : ""})`, "info", owner);
       await agentTurn(b, {
@@ -338,22 +424,35 @@ export async function runBuild(buildId: string, jobId: string | null) {
       if (infra) throw new JobError(`The sandbox could not run ${infra.command}: ${infra.diagnosis} This is not a code defect; the run will retry.`, true, "sandbox_infrastructure");
       const confirmed = impact.flags.filter((f) => f.confidence === "confirmed");
       await update(b, { phase: "review" });
+      // Browser verification of the rendered app (UI-visible changes only, after the tests pass). Unavailable ≠ passed.
+      let browserRes: BrowserResult | null = null;
+      if (ver.passed && !confirmed.length && uiVisible(item.kind, changed.map((c) => c.path))) {
+        await event(b, `Rendering ${b.itemKey} in a real browser (desktop + mobile)`, "info", "qa-engineer");
+        browserRes = await verifyInBrowser({ treeDir: tree.dir, buildId: b.id, files: after.files.map((f) => f.path), apiRoutes: after.routes, evidenceDir: join(evidenceRoot(), b.companyId, b.id, `attempt-${attempt}`) });
+        await update(b, { browser: JSON.stringify({ ...browserRes, attempt }) });
+        if (browserRes.status === "unavailable") ver.notes.push(`Browser verification not run: ${browserRes.reason}`);
+      }
+      const browserFindings: Finding[] = (browserRes?.findings ?? []).map((f) => ({ source: "browser", severity: f.severity, title: `browser ${f.kind.replace(/_/g, " ")} (${f.route} @ ${f.viewport})`, detail: f.detail, evidence: `real Chromium run of build ${b.id.slice(-6)} attempt ${attempt}`, blocking: f.blocking }));
+      const browserEvidence = browserRes && browserRes.status !== "unavailable" ? `\n\n# Browser verification (real Chromium; observations)\nStatus: ${browserRes.status}\n${browserRes.routes.map((r) => `- ${r.route} @ ${r.viewport}: HTTP ${r.httpStatus}`).join("\n")}\n${browserRes.journeys.map((j) => `- journey "${j.name}": ${j.status} — ${j.detail}`).join("\n")}\n${browserRes.findings.map((f) => `- [${f.kind}] ${f.route} @ ${f.viewport}: ${f.detail}`).join("\n") || "- no findings"}` : browserRes ? `\n\n# Browser verification\nNOT RUN: ${browserRes.reason}. Browser-visible criteria cannot be 'met' from browser evidence.` : "";
+      ver.browserEvidence = browserEvidence;
       const rv = ver.passed && !confirmed.length
-        ? await review(b, tree, acceptance, ver, impact, item.risk)
-        : { criteria: acceptance.map((text) => ({ text, status: "unverified" as const, evidence: ver.passed ? "not reviewed: impact analysis found confirmed breakage" : "verification failed before review" })), findings: [] as Finding[] };
+        ? await review(b, tree, verifyCriteria, ver, impact, assessed.risk, plan)
+        : { criteria: verifyCriteria.map((text) => ({ text, status: "unverified" as const, evidence: ver.passed ? "not reviewed: impact analysis found confirmed breakage" : "verification failed before review" })), findings: [] as Finding[], decision: null, outcomes: [] };
       const verFindings: Finding[] = ver.results.filter((r) => !r.ok).map((r) => ({ source: "verification", severity: "high", title: `${r.id} failed: ${r.command}`, detail: r.summary, evidence: `command run ${r.commandRunId}`, blocking: true }));
       if (!ver.hasTest) verFindings.push({ source: "verification", severity: "high", title: "No test command", detail: ver.notes.join(" "), evidence: "package.json", blocking: true });
       const impFindings: Finding[] = impact.flags.map((f) => ({ source: "impact", severity: f.severity, title: `${f.kind.replace(/_/g, " ")}${f.confidence === "confirmed" ? "" : " (warning)"}`, detail: f.detail, evidence: `static analysis: ${f.files.join(", ")}`, blocking: f.confidence === "confirmed" }));
       // Deterministic gate policy (versioned; evaluated in src/lib/lab before becoming the default).
-      const policy = GATE_POLICIES[process.env.AURA_GATE_POLICY ?? ""] ?? GATE_POLICIES[DEFAULT_GATE_POLICY];
+      // HIGH-risk work uses the stricter v3 gate (lab-evaluated: rejects tautological/weakened tests and dynamic code).
+      const policy = GATE_POLICIES[gatePolicyId];
       const gv = gateVerdict(policy, { results: ver.results, hasTest: ver.hasTest, impact, task: `${item.title}\n${item.description}\n${acceptance.join("\n")}`, beforeFiles: baseFiles, afterFiles });
       const gateFindings: Finding[] = gv.reasons.filter((r) => !V1_REASON_CODES.includes(r.code)).map((r) => ({ source: "verification", severity: "high", title: `gate ${policy.id}: ${r.code.replace(/_/g, " ")}`, detail: r.detail, evidence: "deterministic verification gate", blocking: true }));
-      const findings = [...verFindings, ...impFindings, ...gateFindings, ...rv.findings];
+      const findings = [...verFindings, ...impFindings, ...gateFindings, ...browserFindings, ...rv.findings];
       const blocking = findings.filter((f) => f.blocking);
       const unmet = rv.criteria.filter((c) => c.status !== "met");
       await update(b, { criteria: JSON.stringify(rv.criteria), findings: JSON.stringify(findings) });
       if (ver.passed && !blocking.length && !unmet.length) {
-        await update(b, { phase: "commit" });
+        (orchestration.attempts as unknown[]).push({ attempt, passed: true, browser: browserRes ? { status: browserRes.status, journeys: browserRes.journeys.map((j) => `${j.name}: ${j.status}`) } : null, decision: rv.decision?.rationale ?? null, disagreement: rv.decision?.disagreement ?? false, reviewers: rv.outcomes });
+        await update(b, { phase: "commit", orchestration: JSON.stringify(orchestration) });
         const c = await commitAndPush(tree, `${item.key}: ${item.title}\n\nVerified by AURA build ${b.id}:\n${ver.results.map((r) => `- ${r.command} → ${r.summary}`).join("\n")}`);
         await update(b, { status: "VERIFIED", phase: "done", headSha: c.sha, summary: ver.results.map((r) => `${r.command}: ${r.summary}`).join("; "), finishedAt: new Date() });
         await event(b, `${b.itemKey} verified and committed to ${b.branch} (${c.sha.slice(0, 8)})`, "success", "devops");
@@ -361,7 +460,15 @@ export async function runBuild(buildId: string, jobId: string | null) {
         return { status: "VERIFIED", sha: c.sha };
       }
       const prior = (await retrieve(b.companyId, product.id, { signatures: openSigs, limit: 4 })).filter((m) => m.kind === "defect_solution").map((m) => ({ content: m.content, ref: `memory ${m.id.slice(-6)}` }));
+      // Category-specific recovery (not "try the same thing again").
+      const recovery = att.open.length ? recoveryFor(att.open, attempt) : { action: "repair" as const, strategy: blocking.length ? "review_findings" : "unproven_criteria", tier: "same" as const, brief: blocking.length ? "Strategy (review findings): address each evidenced blocking finding below; do not argue with evidence in code." : "Strategy (unproven criteria): the code may be right but the criteria are not proven — add or fix tests that exercise each unproven criterion through the real API." };
+      (orchestration.attempts as unknown[]).push({ attempt, passed: ver.passed, defects: att.open.map((d) => ({ category: d.category, occurrences: d.occurrences })), blocking: blocking.length, unmet: unmet.length, recovery: recovery.strategy, browser: browserRes ? { status: browserRes.status, findings: browserRes.findings.filter((f) => f.blocking).map((f) => `${f.kind} ${f.route}@${f.viewport}`), journeys: browserRes.journeys.map((j) => `${j.name}: ${j.status}`) } : null, decision: rv.decision?.rationale ?? null, disagreement: rv.decision?.disagreement ?? false, reviewers: rv.outcomes });
+      await update(b, { orchestration: JSON.stringify(orchestration) });
+      if (recovery.action === "retry_later") throw new JobError(`${recovery.brief}`, true, "sandbox_infrastructure");
+      if ("tier" in recovery && recovery.tier === "escalate") escalate = true;
       feedback = [
+        recovery.brief,
+        browserRes ? browserBrief(browserRes) : "",
         diagnosisBrief(att.open, ver.results, prior),
         ...confirmed.map((f) => `[impact/confirmed] ${f.kind}: ${f.detail}`),
         ...blocking.filter((f) => !["verification", "impact"].includes(f.source)).map((f) => `[${f.source}] ${f.title}: ${f.detail} (evidence: ${f.evidence})`),

@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { AGENT_DEFS, getAgentDef } from "@/lib/agents/definitions";
+import { libraryPrompt, PROMPT_LIBRARY_VERSION } from "@/lib/agents/prompts";
 import { audit } from "@/lib/events/emit";
 
 export const PROMPT_STATUSES = ["DRAFT", "EVALUATING", "APPROVED", "ACTIVE", "DEPRECATED", "ROLLED_BACK"] as const;
@@ -52,19 +53,34 @@ export function hashContent(c: VersionContent): string {
     .digest("hex");
 }
 
-/** Idempotently import built-in agent prompts as v1 ACTIVE for a workspace. */
+/**
+ * Idempotently import built-in agent prompts as v1 ACTIVE for a workspace.
+ * For workspaces created before a prompt-library release, the new library
+ * text is added once as a DRAFT version (never auto-activated): it is promoted
+ * through the normal evaluate → approve → promote path, so a prompt change is
+ * adopted only on evidence and the previous version stays available for rollback.
+ */
 export async function ensureBuiltinPrompts(companyId: string) {
   for (const def of AGENT_DEFS) {
     const key = agentPromptKey(def.key);
-    const existing = await prisma.promptTemplate.findUnique({ where: { companyId_key: { companyId, key } } });
-    if (existing) continue;
     const content: VersionContent = {
       content: def.systemPrompt,
       inputVars: ["company_state", "memory", "context", "objective"],
-      outputContract: "Free text, or JSON matching the simulator `kind` contract when one is requested.",
+      outputContract: libraryPrompt(def.key) ? "Engineering agents: real tool use, then a final summary (implementers) or ONE review JSON object {verdict, criteria, findings, confidence, notVerified} (QA/security/reviewer), validated by the caller." : "Free text, or JSON matching the simulator `kind` contract when one is requested.",
       modelReqs: { minTier: def.tier },
       datasetId: def.key,
     };
+    const existing = await prisma.promptTemplate.findUnique({ where: { companyId_key: { companyId, key } } });
+    if (existing) {
+      if (!libraryPrompt(def.key)) continue;
+      const hash = hashContent(content);
+      if (await prisma.promptVersion.findFirst({ where: { templateId: existing.id, contentHash: hash }, select: { id: true } })) continue;
+      const last = await prisma.promptVersion.findFirst({ where: { templateId: existing.id }, orderBy: { version: "desc" }, select: { version: true } });
+      await prisma.promptVersion.create({ data: { templateId: existing.id, companyId, version: (last?.version ?? 0) + 1, content: content.content, inputVars: JSON.stringify(content.inputVars), outputContract: content.outputContract, modelReqs: JSON.stringify(content.modelReqs), datasetId: content.datasetId, author: `library:${PROMPT_LIBRARY_VERSION}`, changelog: `Prompt library ${PROMPT_LIBRARY_VERSION} (src/lib/agents/prompts.ts): operational role card + shared engineering and security rules. Draft — evaluate before promoting.`, contentHash: hash, status: "DRAFT" } }).catch((e) => {
+        if ((e as { code?: string }).code !== "P2002") throw e; // concurrent import
+      });
+      continue;
+    }
     await prisma.promptTemplate.create({
       data: {
         companyId,
@@ -81,8 +97,8 @@ export async function ensureBuiltinPrompts(companyId: string) {
             outputContract: content.outputContract,
             modelReqs: JSON.stringify(content.modelReqs),
             datasetId: content.datasetId,
-            author: "builtin:definitions.ts",
-            changelog: "Imported from src/lib/agents/definitions.ts",
+            author: libraryPrompt(def.key) ? `library:${PROMPT_LIBRARY_VERSION}` : "builtin:definitions.ts",
+            changelog: libraryPrompt(def.key) ? `Imported from the prompt library ${PROMPT_LIBRARY_VERSION} (src/lib/agents/prompts.ts)` : "Imported from src/lib/agents/definitions.ts",
             contentHash: hashContent(content),
             status: "ACTIVE",
             activatedAt: new Date(),
@@ -164,7 +180,7 @@ export async function resolveAgentPrompt(companyId: string, agentKey: string): P
   const def = getAgentDef(agentKey);
   const active = await getActiveVersion(companyId, agentPromptKey(agentKey)).catch(() => null);
   if (active) return { system: active.content, promptVersionId: active.id, promptRef: `${agentPromptKey(agentKey)}@v${active.version}` };
-  return { system: def?.systemPrompt ?? "", promptVersionId: null, promptRef: `builtin:${agentKey}` };
+  return { system: def?.systemPrompt ?? "", promptVersionId: null, promptRef: `builtin:${agentKey}${libraryPrompt(agentKey) ? `@${PROMPT_LIBRARY_VERSION}` : ""}` };
 }
 
 export async function listTemplates(companyId: string) {

@@ -11,6 +11,10 @@ const ROWS: [string, (id: keyof typeof PLANS) => string][] = [
   ["Sandbox minutes / month", (id) => String(PLANS[id].limits.sandboxMinutesPerMonth)],
   ["Runs at the same time", (id) => String(PLANS[id].limits.concurrentBuilds)],
   ["Seats", (id) => String(PLANS[id].limits.seats)],
+  ["Deployments / month", (id) => (PLANS[id].limits.deploysPerMonth ? String(PLANS[id].limits.deploysPerMonth) : "—")],
+  ["Production deployments (approval-gated)", (id) => (PLANS[id].features.productionDeploys ? "Yes" : "—")],
+  ["Run output retention (max)", (id) => `${PLANS[id].limits.retentionDays} days`],
+  ["Engineering lab and autonomous goals", (id) => (PLANS[id].features.advancedAgents ? "Yes" : "—")],
   ["GitHub integration and pull requests", (id) => (PLANS[id].features.pullRequests ? "Yes" : "—")],
   ["Priority support", (id) => (PLANS[id].features.prioritySupport ? "Yes" : "—")],
 ];
@@ -21,7 +25,7 @@ export default function Pricing() {
       <SiteHeader />
       <main className="mx-auto max-w-6xl px-5 py-16">
         <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Pricing</h1>
-        <p className="mt-3 max-w-2xl text-text-muted">Monthly plans, billed through Stripe. Change or cancel any time from Settings. Usage limits reset on the first of each month.</p>
+        <p className="mt-3 max-w-2xl text-text-muted">Monthly or annual plans, billed through Stripe. Upgrades are prorated. Change or cancel any time from Settings. Usage limits reset on the first of each month.</p>
         <PricingCards />
         <div className="mt-14 overflow-x-auto">
           <table className="w-full text-left text-sm">

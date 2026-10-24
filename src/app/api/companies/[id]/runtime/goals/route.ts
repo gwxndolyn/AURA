@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ok, handler, parseBody } from "@/lib/api";
+import { assertFeature } from "@/lib/billing/entitlements";
 import { requireWorkspaceAccess } from "@/lib/auth/authz";
 import { prisma } from "@/lib/db";
 import { parseJSON } from "@/lib/utils";
@@ -27,6 +28,7 @@ export const POST = handler(async (req, ctx: Ctx) => {
   const { id } = await ctx.params;
   const b = await parseBody(req, Body);
   const { user } = await requireWorkspaceAccess(id, MODE_ROLE[b.mode]);
+  await assertFeature(id, "advanced_agents");
   if (b.schedule) {
     const s = await createSchedule({ companyId: id, name: b.title ?? `${b.kind} (${b.mode})`, jobType: "goal.submit", payload: { kind: b.kind, mode: b.mode, request: b.request, title: b.title, productId: b.productId, limits: b.limits, userId: user.userId, email: user.email }, spec: b.schedule, createdBy: user.email });
     return ok({ scheduled: true, scheduleId: s.id, nextRunAt: s.nextRunAt }, { status: 201 });

@@ -34,6 +34,7 @@ beforeAll(async () => {
   for (const n of ["owner", "member", "outsider"]) users[n] = await prisma.user.create({ data: { email: `${n}_${s}@lab.local`, name: n } });
   ws = (await createCompany({ name: "LAB", mission: "m", industry: "SaaS", ownerId: users.owner.id })).id;
   otherWs = (await createCompany({ name: "LAB-O", mission: "m", industry: "SaaS", ownerId: users.outsider.id })).id;
+  await prisma.subscription.create({ data: { companyId: ws, plan: "team", status: "active" } }); // the engineering lab is a Team feature
   await prisma.workspaceMember.create({ data: { userId: users.member.id, companyId: ws, role: "MEMBER" } });
 }, 60_000);
 

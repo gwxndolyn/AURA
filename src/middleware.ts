@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionTokenEdge } from "@/lib/auth/edge";
+import { csrfViolation } from "@/lib/auth/csrf";
 
 const SESSION_COOKIE = "aura_session";
 
@@ -14,7 +15,8 @@ const SESSION_COOKIE = "aura_session";
  * requireUser() themselves.
  */
 const PUBLIC_API = [/^\/api\/auth\//, /^\/api\/health$/];
-const PUBLIC_PAGES = ["/", "/login", "/register", "/forgot-password", "/reset-password", "/health", "/pricing", "/docs", "/terms", "/privacy", "/security"];
+// Every other /api route outside /api/companies authenticates itself (requireUser / signatures).
+const PUBLIC_PAGES = ["/", "/login", "/register", "/forgot-password", "/reset-password", "/verify-email", "/invite", "/health", "/pricing", "/docs", "/terms", "/privacy", "/security"];
 
 /**
  * Simulation-lab surfaces (legacy company simulator). Disabled unless
@@ -25,6 +27,8 @@ const LAB_PAGE = /^\/app\/([^/]+)\/(lab|twin|projects|decisions|deployments|infr
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const csrf = csrfViolation(req.method, pathname, req.headers, req.nextUrl.origin);
+  if (csrf) return NextResponse.json({ ok: false, error: "Cross-site request blocked" }, { status: 403 });
   if (process.env.AURA_SIMULATION_LAB !== "1") {
     if (LAB_API.test(pathname)) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
     const m = pathname.match(LAB_PAGE);
@@ -57,5 +61,6 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/app/:path*", "/api/companies/:path*"],
+  // /api/:path* so the CSRF origin check covers every state-changing API call (auth, onboarding, admin…).
+  matcher: ["/app/:path*", "/api/:path*"],
 };

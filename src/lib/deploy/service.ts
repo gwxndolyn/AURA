@@ -20,6 +20,10 @@
  *    VERIFIED deployment is restored (automatic, reversible), status
  *    ROLLED_BACK with the evidence.
  */
+import { redactText } from "@/lib/security/redact";
+import { assertFeature, recordUsage, reserve, settle } from "@/lib/billing/entitlements";
+import { createId } from "@/lib/utils";
+import { RESERVED_SECRET, secretNamesPresent, decryptSecretsFor } from "@/lib/security/secrets";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/api";
 import { parseJSON } from "@/lib/utils";
@@ -27,7 +31,7 @@ import { audit } from "@/lib/events/emit";
 import { enqueue, JobError, progress } from "@/lib/jobs/queue";
 import { callTool } from "@/lib/agents/tools";
 import { listFiles, readAt } from "@/lib/factory/git";
-import { loadProduct, requestApproval, productEvent } from "@/lib/factory/store";
+import { loadProduct, requestApproval, productEvent, assertNotArchived } from "@/lib/factory/store";
 import { providerOf, PROVIDERS, DeployError, type TargetConfig } from "./providers";
 import { verifyDeployment } from "./verify";
 
@@ -38,7 +42,7 @@ type Dep = NonNullable<Awaited<ReturnType<typeof prisma.productDeployment.findFi
 
 async function appendLog(id: string, line: string) {
   const d = await prisma.productDeployment.findUnique({ where: { id }, select: { logs: true } });
-  await prisma.productDeployment.update({ where: { id }, data: { logs: `${d?.logs ?? ""}[${new Date().toISOString()}] ${line}\n`.slice(-60_000) } });
+  await prisma.productDeployment.update({ where: { id }, data: { logs: `${d?.logs ?? ""}[${new Date().toISOString()}] ${redactText(line)}\n`.slice(-60_000) } });
 }
 
 // ---------------------------------------------------------------------------
@@ -46,11 +50,33 @@ async function appendLog(id: string, line: string) {
 // ---------------------------------------------------------------------------
 
 const ENV_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * Values for a target's secret env names. They come from the WORKSPACE's own
+ * encrypted secret store. The AURA server's process env is never a source —
+ * except names the operator explicitly lists in AURA_DEPLOY_ENV_ALLOWLIST
+ * (single-tenant self-hosting) — so one tenant can never pull the platform's
+ * credentials (or anything else in the server environment) into its app.
+ */
+function operatorAllowed(): Set<string> {
+  return new Set((process.env.AURA_DEPLOY_ENV_ALLOWLIST ?? "").split(",").map((s) => s.trim()).filter((n) => ENV_NAME.test(n) && !RESERVED_SECRET.test(n)));
+}
+async function secretsPresent(companyId: string, names: string[]) {
+  const stored = await secretNamesPresent(companyId, names);
+  const allowed = operatorAllowed();
+  return Object.fromEntries(names.map((n) => [n, stored.has(n) || (allowed.has(n) && !!process.env[n])]));
+}
+async function resolveSecretEnv(companyId: string, names: string[], purpose: { actor: string; target: string }) {
+  const { values, missing } = names.length ? await decryptSecretsFor(companyId, names, purpose) : { values: {} as Record<string, string>, missing: [] as string[] };
+  const allowed = operatorAllowed();
+  for (const n of missing) if (allowed.has(n) && process.env[n]) values[n] = process.env[n]!;
+  return values;
+}
 export async function upsertTarget(input: { companyId: string; productId: string; env: Env; provider: string; config: TargetConfig; secretEnvNames: string[]; autoDeploy: boolean; actor: string }) {
   await loadProduct(input.companyId, input.productId);
   const prov = providerOf(input.provider);
   if (input.env === "production" && input.autoDeploy) throw new ApiError("Production deployments always require an approval; autoDeploy is only for preview", 422);
-  for (const n of input.secretEnvNames) if (!ENV_NAME.test(n) || /^(AURA_|ANTHROPIC|DATABASE_URL|AUTH_SECRET|STRIPE|GITHUB)/.test(n)) throw new ApiError(`${n} cannot be injected into a product (AURA's own secrets are never shared)`, 422);
+  for (const n of input.secretEnvNames) if (!ENV_NAME.test(n) || RESERVED_SECRET.test(n)) throw new ApiError(`${n} cannot be injected into a product (AURA's own secrets are never shared)`, 422);
   for (const k of Object.keys(input.config.env ?? {})) if (!ENV_NAME.test(k)) throw new ApiError(`Invalid env var name ${k}`, 422);
   if (input.config.port !== undefined && !(Number.isInteger(input.config.port) && input.config.port >= 1024 && input.config.port <= 65535)) throw new ApiError("port must be 1024–65535", 422);
   if (input.config.bindAddress && !["127.0.0.1", "0.0.0.0"].includes(input.config.bindAddress)) throw new ApiError("bindAddress must be 127.0.0.1 or 0.0.0.0", 422);
@@ -67,7 +93,7 @@ export async function upsertTarget(input: { companyId: string; productId: string
 export async function listTargets(companyId: string, productId: string) {
   await loadProduct(companyId, productId); // 404 for a product outside this workspace (never an empty 200)
   const rows = await prisma.deployTarget.findMany({ where: { companyId, productId } });
-  return rows.map((t) => ({ ...t, config: parseJSON<TargetConfig>(t.config, {}), secretEnvNames: parseJSON<string[]>(t.secretEnvNames, []), secretsPresent: Object.fromEntries(parseJSON<string[]>(t.secretEnvNames, []).map((n) => [n, !!process.env[n]])) }));
+  return Promise.all(rows.map(async (t) => ({ ...t, config: parseJSON<TargetConfig>(t.config, {}), secretEnvNames: parseJSON<string[]>(t.secretEnvNames, []), secretsPresent: await secretsPresent(companyId, parseJSON<string[]>(t.secretEnvNames, [])) })));
 }
 
 // ---------------------------------------------------------------------------
@@ -93,8 +119,9 @@ export async function preflight(companyId: string, productId: string, env: Env) 
     const prov = PROVIDERS[target.provider];
     const live = prov ? await prov.verify(parseJSON<TargetConfig>(target.config, {})) : { ok: false, detail: "unknown provider" };
     if (!live.ok) checks.find((x) => x.id === "target")!.status = "failed", checks.find((x) => x.id === "target")!.detail = `re-verified now: ${live.detail}`;
-    const missing = parseJSON<string[]>(target.secretEnvNames, []).filter((n) => !process.env[n]);
-    checks.push({ id: "config", label: "Required environment variables present", status: missing.length ? "failed" : "passed", detail: missing.length ? `missing on the AURA server: ${missing.join(", ")}` : `${parseJSON<string[]>(target.secretEnvNames, []).length} secret(s) + ${Object.keys(parseJSON<TargetConfig>(target.config, {}).env ?? {}).length} plain var(s)` });
+    const present = await secretsPresent(companyId, parseJSON<string[]>(target.secretEnvNames, []));
+    const missing = Object.entries(present).filter(([, v]) => !v).map(([k]) => k);
+    checks.push({ id: "config", label: "Required environment variables present", status: missing.length ? "failed" : "passed", detail: missing.length ? `not set in this workspace's secrets (Settings → Secrets): ${missing.join(", ")}` : `${parseJSON<string[]>(target.secretEnvNames, []).length} secret(s) + ${Object.keys(parseJSON<TargetConfig>(target.config, {}).env ?? {}).length} plain var(s)` });
   }
   const current = await prisma.productDeployment.findFirst({ where: { productId, companyId, env, status: "VERIFIED" }, orderBy: { finishedAt: "desc" } });
   if (c?.sha && p.repoId) {
@@ -113,10 +140,15 @@ export async function preflight(companyId: string, productId: string, env: Env) 
 
 export async function requestProductDeploy(companyId: string, productId: string, env: Env, actor: string) {
   const p = await loadProduct(companyId, productId);
+  assertNotArchived(p);
+  await assertFeature(companyId, env === "production" ? "deploy_production" : "deploy_request");
   const pf = await preflight(companyId, productId, env);
   if (!pf.ok) throw new ApiError(`Preflight failed: ${pf.checks.filter((c) => c.status === "failed").map((c) => `${c.label} (${c.detail})`).join("; ")}`, 409);
   const auto = env === "preview" && pf.target!.autoDeploy && ["BOUNDED", "CONTINUOUS"].includes(p.autonomy);
-  const dep = await prisma.productDeployment.create({ data: { companyId, productId, targetId: pf.target!.id, env, provider: pf.target!.provider, ref: pf.release!.branch, sha: pf.release!.sha, releaseVersion: pf.rc!.version, status: auto ? "QUEUED" : "PREFLIGHT", preflight: JSON.stringify(pf.checks), previousId: pf.current?.id ?? null, requestedBy: actor } });
+  const depId = createId();
+  // Monthly deployment quota: atomically held now; settled when the deployment starts, released if rejected/cancelled.
+  await reserve(companyId, "deploy", `deploy:${depId}`, 1, { ttlMs: 7 * 86400_000 });
+  const dep = await prisma.productDeployment.create({ data: { id: depId, companyId, productId, targetId: pf.target!.id, env, provider: pf.target!.provider, ref: pf.release!.branch, sha: pf.release!.sha, releaseVersion: pf.rc!.version, status: auto ? "QUEUED" : "PREFLIGHT", preflight: JSON.stringify(pf.checks), previousId: pf.current?.id ?? null, requestedBy: actor } });
   await audit(companyId, actor, "DEPLOY_REQUESTED", dep.id, `${env} ${pf.release!.sha.slice(0, 8)}`);
   if (auto) return { deployment: await startDeployJob(dep, null, actor), approval: null };
   const a = await requestApproval(p, { action: env === "production" ? "deploy_production" : "deploy_preview", actionClass: env === "production" ? "production" : "infrastructure", target: `${env}@${pf.release!.sha.slice(0, 8)}`, summary: `Deploy release candidate ${pf.rc!.version} to ${env} (${pf.target!.provider})`, risks: pf.checks.filter((c) => c.status === "warning").map((c) => `${c.label}: ${c.detail}`), evidence: [{ kind: "deployment", ref: dep.id, detail: `${env} ${pf.release!.sha.slice(0, 8)}` }], payload: { deploymentId: dep.id, sha: pf.release!.sha, env } });
@@ -126,6 +158,8 @@ export async function requestProductDeploy(companyId: string, productId: string,
 }
 
 async function startDeployJob(dep: Dep, approvalId: string | null, actor: string) {
+  await recordUsage(dep.companyId, [{ metric: "deploy", quantity: 1 }], `deploy:${dep.id}`, { productId: dep.productId });
+  await settle(`deploy:${dep.id}`, "deploy", 1, { alreadyCounted: true });
   const job = await enqueue({ companyId: dep.companyId, type: "deploy.run", payload: { deploymentId: dep.id, approvalId }, dedupeKey: `deploy:${dep.id}`, maxAttempts: 1, createdBy: actor, concurrencyKey: `deploy:${dep.productId}:${dep.env}`, timeoutMs: 20 * 60_000, priority: 20 });
   return prisma.productDeployment.update({ where: { id: dep.id }, data: { status: "QUEUED", jobId: job.id } });
 }
@@ -134,7 +168,10 @@ async function startDeployJob(dep: Dep, approvalId: string | null, actor: string
 export async function onDeployApproval(companyId: string, approvalId: string, decision: "approve" | "reject", actor: string) {
   const dep = await prisma.productDeployment.findFirst({ where: { companyId, approvalId, status: "PREFLIGHT" } });
   if (!dep) return null;
-  if (decision === "reject") return prisma.productDeployment.update({ where: { id: dep.id }, data: { status: "CANCELLED", failure: `approval rejected by ${actor}`, finishedAt: new Date() } });
+  if (decision === "reject") {
+    await settle(`deploy:${dep.id}`, "deploy", null);
+    return prisma.productDeployment.update({ where: { id: dep.id }, data: { status: "CANCELLED", failure: `approval rejected by ${actor}`, finishedAt: new Date() } });
+  }
   return startDeployJob(dep, approvalId, actor);
 }
 
@@ -173,7 +210,7 @@ export async function runDeployment(deploymentId: string, ctx: { approvalId: str
   const exec = async () => {
     await step("BUILDING", `building ${dep.ref} @ ${dep.sha.slice(0, 8)} with ${prov.id}`);
     const files = await filesAt(dep.companyId, product.repoId!, dep.sha);
-    const secretEnv = Object.fromEntries(parseJSON<string[]>(target.secretEnvNames, []).map((n) => [n, process.env[n] ?? ""]));
+    const secretEnv = await resolveSecretEnv(dep.companyId, parseJSON<string[]>(target.secretEnvNames, []), { actor: "devops", target: `deployment ${dep.id} (${dep.env})` });
     // A fresh port slot when replacing a live deployment of the same target would clash: stop the old one only after the new one verifies.
     const previous = dep.previousId ? await prisma.productDeployment.findUnique({ where: { id: dep.previousId } }) : null;
     const prevRef = previous ? parseJSON<Record<string, string>>(previous.providerRef, {}) : null;
@@ -229,7 +266,7 @@ export async function runDeployment(deploymentId: string, ctx: { approvalId: str
     if (previous) {
       try {
         await prov.stopEnv(dep.productId, dep.env);
-        const back = await prov.deploy({ deploymentId: previous.id, productId: dep.productId, env: dep.env, files: await filesAt(dep.companyId, product.repoId!, previous.sha), config: { ...cfg, ...parseJSON<TargetConfig>(previous.targetConfig, {}) }, secretEnv: Object.fromEntries(parseJSON<string[]>(target.secretEnvNames, []).map((n) => [n, process.env[n] ?? ""])), log });
+        const back = await prov.deploy({ deploymentId: previous.id, productId: dep.productId, env: dep.env, files: await filesAt(dep.companyId, product.repoId!, previous.sha), config: { ...cfg, ...parseJSON<TargetConfig>(previous.targetConfig, {}) }, secretEnv: await resolveSecretEnv(dep.companyId, parseJSON<string[]>(target.secretEnvNames, []), { actor: "devops", target: `rollback of deployment ${dep.id}` }), log });
         await prisma.productDeployment.update({ where: { id: previous.id }, data: { providerRef: JSON.stringify(back.providerRef) } });
         await prisma.productDeployment.update({ where: { id: dep.id }, data: { status: "ROLLED_BACK", rolledBackTo: previous.id } });
       } catch { /* recorded in logs; the target needs a person */ }
@@ -241,6 +278,7 @@ export async function runDeployment(deploymentId: string, ctx: { approvalId: str
 /** Manual rollback to the last VERIFIED/SUPERSEDED deployment before the current one (needs a production-class approval). */
 export async function requestRollback(companyId: string, productId: string, env: Env, actor: string) {
   const p = await loadProduct(companyId, productId);
+  assertNotArchived(p);
   const current = await prisma.productDeployment.findFirst({ where: { companyId, productId, env, status: "VERIFIED" }, orderBy: { finishedAt: "desc" } });
   if (!current) throw new ApiError("Nothing is deployed", 409);
   const prev = await prisma.productDeployment.findFirst({ where: { companyId, productId, env, status: "SUPERSEDED", finishedAt: { lt: current.finishedAt! } }, orderBy: { finishedAt: "desc" } });

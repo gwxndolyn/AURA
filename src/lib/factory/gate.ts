@@ -27,13 +27,13 @@ import { loadProduct, limitsOf, productEvent } from "./store";
 export type GateStatus = "passed" | "failed" | "blocked" | "not_verified";
 export interface GateCriterion { id: string; label: string; status: GateStatus; required: boolean; detail: string; evidence: { kind: string; ref: string; detail: string }[] }
 
-export const GATE_CRITERIA = ["requirements", "tasks", "build", "tests", "integration", "journeys", "api_db", "security", "review", "regression", "approvals", "blockers", "delivery"] as const;
+export const GATE_CRITERIA = ["requirements", "tasks", "build", "tests", "integration", "browser", "journeys", "api_db", "security", "review", "regression", "approvals", "blockers", "delivery"] as const;
 export type GateCriterionId = (typeof GATE_CRITERIA)[number];
 
 export const QUALITY_PROFILES: Record<string, { label: string; description: string; required: GateCriterionId[] }> = {
   "static-site": { label: "Static / marketing site", description: "Content and pages; build and tests required, no security-critical data.", required: ["tasks", "build", "tests", "blockers"] },
   "web-app": { label: "Web application", description: "Default: every requirement traced to verified work, tests, integration, review and security review.", required: ["requirements", "tasks", "build", "tests", "integration", "security", "review", "blockers"] },
-  "financial": { label: "Financial / regulated application", description: "Everything in web-app plus no open regression warnings, API/data consistency, recorded approvals and end-to-end journey evidence.", required: ["requirements", "tasks", "build", "tests", "integration", "journeys", "api_db", "security", "review", "regression", "approvals", "blockers"] },
+  "financial": { label: "Financial / regulated application", description: "Everything in web-app plus browser verification of the UI, no open regression warnings, API/data consistency, recorded approvals and end-to-end journey evidence.", required: ["requirements", "tasks", "build", "tests", "integration", "browser", "journeys", "api_db", "security", "review", "regression", "approvals", "blockers"] },
 };
 export const profileOf = (id: string | null | undefined) => QUALITY_PROFILES[id ?? ""] ? (id as string) : "web-app";
 
@@ -93,6 +93,12 @@ export async function evaluateGate(companyId: string, productId: string) {
   const deployedHealth = deployed ? parseJSON<{ path: string; ok: boolean; detail: string }[]>(deployed.health, []) : [];
   const rcSha = rcRow ? parseJSON<{ sha?: string }>(rcRow.content, {}).sha : undefined;
   checks.push(crit("journeys", "Critical user journeys verified on the deployed application", !deployed ? "not_verified" : deployed.sha !== rcSha ? "not_verified" : deployedHealth.length > 1 && deployedHealth.every((h) => h.ok) ? "passed" : "failed", !deployed ? "not deployed yet; journey checks run against the deployment (HTTP status/text; no browser automation of generated UIs)" : deployed.sha !== rcSha ? `deployed ${deployed.sha.slice(0, 8)} is not the current release candidate` : `${deployedHealth.filter((h) => h.ok).length}/${deployedHealth.length} checks at ${deployed.url}`, deployedHealth.map((h) => ({ kind: "health", ref: deployed!.id, detail: `${h.path}: ${h.detail}` })), req));
+
+  // Browser verification of UI-visible verified work (real Chromium against the running app; V10).
+  const browsed = verifiedBuilds.map((b) => ({ b, r: parseJSON<{ status?: string; reason?: string; journeys?: { name: string; status: string; detail: string }[]; findings?: { kind: string; blocking: boolean }[] }>((b as { browser?: string }).browser ?? "{}", {}) })).filter((x) => x.r.status);
+  const browserFailed = browsed.filter((x) => x.r.status === "failed");
+  const browserRan = browsed.filter((x) => x.r.status !== "unavailable");
+  checks.push(crit("browser", "UI verified in a real browser (desktop + mobile)", !browsed.length ? "not_verified" : browserFailed.length ? "failed" : browserRan.length === browsed.length ? "passed" : "not_verified", !browsed.length ? "no UI-visible change has been browser-verified yet" : `${browserRan.length}/${browsed.length} UI change(s) rendered and checked${browsed.length > browserRan.length ? `; not run: ${browsed.find((x) => x.r.status === "unavailable")?.r.reason}` : ""}${browsed.flatMap((x) => x.r.journeys ?? []).length ? `; journeys: ${browsed.flatMap((x) => (x.r.journeys ?? []).map((j) => `${j.name} ${j.status}`)).join(", ")}` : ""}`, browsed.map((x) => ({ kind: "browser", ref: x.b.id, detail: `${x.b.itemKey}: ${x.r.status}` })), req));
 
   const impacts = verifiedBuilds.map((b) => ({ b, imp: parseJSON<{ flags?: { kind: string; confidence: string; severity: string; detail: string }[] }>(b.impact, {}) }));
   const flags = impacts.flatMap((x) => (x.imp.flags ?? []).map((f) => ({ ...f, buildId: x.b.id, itemKey: x.b.itemKey })));
