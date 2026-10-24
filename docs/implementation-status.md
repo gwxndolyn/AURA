@@ -21,7 +21,8 @@ Design: [architecture/learning.md](architecture/learning.md).
 | Agent performance with explicit denominators/exclusions | `agentPerformance` | Verified | eval 12 | — | — |
 | Controlled optimization: problems → bounded DRAFT → A/B → gated promotion → rollback; simulated evidence cannot promote; per-category regression rejects lab candidates | `learning/optimize.ts`, `intelligence/experiments.ts`, `lab/lab.ts` | Verified | eval 10, 11; intelligence workflow test (simulated promotion blocked) | **No live-model A/B run** (no key) | Run `evaluate` with a live key, ≥ 3 repetitions |
 | User feedback → criteria / instructions / browser / scope / reviewer actions; editable; scoped | `learning/feedback.ts`, routes, run view, workspace | Verified | eval 9; commercial suite (authz, isolation, CRUD) | Rule-based classification | — |
-| Engineering-intelligence workspace | `/app/[id]/learning`, `/api/companies/[id]/learning/*` | Implemented; API verified; `next build` passes | commercial suite | UI not e2e-tested | e2e spec |
+| Engineering-intelligence workspace | `/app/[id]/learning`, `/api/companies/[id]/learning/*` | Verified | commercial suite (API); `e2e/learning.spec.ts` (real browser: empty states, feedback actions shown, disable/delete, settings members/usage/secrets/security tabs, audit entries) | Populated-state UI covered by API tests only | — |
+| Lifecycle events plan.approved / delivered | `factory/release.ts`, `deploy/service.ts` | Implemented | typecheck; emitted on scope approval and verified deployment | Not yet consumed by a handler (recorded for timelines) | Delivery outcome on RunOutcome |
 | Delivery independent of learning | emit/retrieval failure-tolerant | Verified | commercial suite (store down → build continues) | — | — |
 
 ## Product craft + agent team — AURA V9/V10 (2026-10-24)

@@ -37,9 +37,12 @@ export const POST = handler(async (req) => {
   if (body.action === "restart") Object.assign(s, { steps: [], skippedAt: undefined, completedAt: undefined, introSeenAt: undefined });
   if (s.steps.length === TOUR_STEPS.length) s.completedAt ??= now;
   await prisma.user.update({ where: { id: userId }, data: { onboarding: JSON.stringify(s) } });
-  if (body.companyId) {
-    await requireWorkspaceAccess(body.companyId, "VIEWER");
-    await audit(body.companyId, userId, "TOUR_PROGRESS", body.action === "step" ? body.step : body.action, "ok");
+  // Usage signal only when progress actually changed (not on every page view), so the audit trail is not
+  // flooded with repeats; actor is the user's email like every other audit entry.
+  const changed = JSON.stringify(s) !== JSON.stringify(parseOnboarding(u?.onboarding));
+  if (body.companyId && changed) {
+    const { user } = await requireWorkspaceAccess(body.companyId, "VIEWER");
+    await audit(body.companyId, user.email, "TOUR_PROGRESS", body.action === "step" ? body.step : body.action, "ok");
   }
   return ok(s);
 });

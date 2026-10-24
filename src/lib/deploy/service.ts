@@ -21,6 +21,7 @@
  *    ROLLED_BACK with the evidence.
  */
 import { redactText } from "@/lib/security/redact";
+import { emit as emitLearning } from "@/lib/learning/service";
 import { assertFeature, recordUsage, reserve, settle } from "@/lib/billing/entitlements";
 import { createId } from "@/lib/utils";
 import { RESERVED_SECRET, secretNamesPresent, decryptSecretsFor } from "@/lib/security/secrets";
@@ -243,6 +244,7 @@ export async function runDeployment(deploymentId: string, ctx: { approvalId: str
     }
     if (previous) await prisma.productDeployment.update({ where: { id: previous.id }, data: { status: "SUPERSEDED" } });
     await prisma.productDeployment.update({ where: { id: dep.id }, data: { status: "VERIFIED", finishedAt: new Date() } });
+    await emitLearning({ companyId: dep.companyId, type: "delivered", key: `delivered:${dep.id}`, productId: dep.productId, payload: { env: dep.env, sha: dep.sha, url: r.url } });
     await log(`VERIFIED: ${v.checks.length} check(s) passed at ${r.url}`);
     return { status: "VERIFIED", url: r.url };
   };

@@ -14,6 +14,7 @@
  *                     targets need a configured provider; none is bundled, so
  *                     the request records exactly what is missing.
  */
+import { emit as emitLearning } from "@/lib/learning/service";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/api";
 import { parseJSON } from "@/lib/utils";
@@ -167,6 +168,7 @@ export async function decideProductApproval(companyId: string, productId: string
   let result: Record<string, unknown> = {};
   if (a.action === "scope") {
     await prisma.product.update({ where: { id: p.id }, data: { scopeApproved: true, scopeApprovedBy: actor, scopeApprovedAt: new Date() } });
+    await emitLearning({ companyId, type: "plan.approved", key: `plan.approved:${a.id}`, productId, payload: { approval: a.id, by: actor } });
   } else if (a.action === "release_candidate") {
     const rc = await prisma.productArtifact.findFirst({ where: { productId, kind: "RELEASE_CANDIDATE", status: "PROPOSED" }, orderBy: { version: "desc" } });
     if (!rc) throw new ApiError("Release candidate no longer available", 410);
