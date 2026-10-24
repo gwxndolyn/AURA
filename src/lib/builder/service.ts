@@ -10,6 +10,7 @@ import { enqueue, cancel as cancelJob, retry as retryJob } from "@/lib/jobs/queu
 import { killSandbox } from "@/lib/sandbox/docker";
 import { assertCanStart, recordUsage, reserve, settle, releaseAll, effectivePlan } from "@/lib/billing/entitlements";
 import { createId } from "@/lib/utils";
+import { emit as emitLearning } from "@/lib/learning/service";
 import { log } from "@/lib/observability/log";
 
 export const BUILD_JOB = "build.run";
@@ -68,6 +69,7 @@ export async function cancelBuild(companyId: string, buildId: string) {
   await prisma.build.update({ where: { id: b.id }, data: { status: "CANCELLED", phase: "done", finishedAt: new Date(), failure: "Cancelled by the user" } });
   if (b.jobId) await cancelJob(companyId, b.jobId);
   await settle(`build:${b.id}`, "concurrent_build", null);
+  await emitLearning({ companyId, type: "build.finished", key: `finished:${b.id}:CANCELLED`, productId: b.productId, buildId: b.id, itemKey: b.itemKey });
   // Propagate to the sandbox: the container executing right now (if any) is killed; the model loop stops at its next turn check.
   const fresh = await prisma.build.findUnique({ where: { id: b.id }, select: { container: true } });
   const killed = fresh?.container ? await killSandbox(fresh.container).catch(() => false) : false;

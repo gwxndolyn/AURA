@@ -650,3 +650,49 @@ describe("artifact downloads (screenshots) enforce tenant scope", () => {
     await prisma.build.delete({ where: { id: b.id } });
   });
 });
+
+describe("engineering intelligence routes (V11): authorization and isolation", () => {
+  it("other tenants get 404; viewers read; only members record feedback; only admins optimize", async () => {
+    const Learning = await import("@/app/api/companies/[id]/learning/route");
+    const Feedback = await import("@/app/api/companies/[id]/learning/feedback/route");
+    const FeedbackItem = await import("@/app/api/companies/[id]/learning/feedback/[feedbackId]/route");
+    const Optimize = await import("@/app/api/companies/[id]/learning/optimize/route");
+    const RunL = await import("@/app/api/companies/[id]/learning/runs/[buildId]/route");
+    await signIn(users.outsider);
+    expect((await Learning.GET(req(), ctx({ id: wsA }))).status).toBe(404);
+    expect((await Feedback.POST(req("POST", { text: "mobile is broken" }), ctx({ id: wsA }))).status).toBe(404);
+    await signIn(users.viewer);
+    expect((await Learning.GET(req(), ctx({ id: wsA }))).status).toBe(200);
+    expect((await Feedback.POST(req("POST", { text: "mobile is broken", productId: productA }), ctx({ id: wsA }))).status).toBe(403);
+    await signIn(users.dev);
+    const fb = await json(await Feedback.POST(req("POST", { text: "The mobile layout is broken", productId: productA }), ctx({ id: wsA })));
+    expect(fb.status).toBe(201);
+    expect(fb.body.data.kind).toBe("responsive");
+    expect((await Feedback.POST(req("POST", { text: "x is wrong", productId: "not-mine" }), ctx({ id: wsA }))).status).toBe(404);
+    expect((await Optimize.POST(req("POST", { action: "propose", agentKey: "backend-engineer", category: "code_generation" }), ctx({ id: wsA }))).status).toBe(403);
+    // Feedback of tenant A cannot be changed through tenant B.
+    await signIn(users.outsider);
+    expect((await FeedbackItem.DELETE(req("DELETE"), ctx({ id: wsB, feedbackId: fb.body.data.id }))).status).toBe(404);
+    const foreignBuild = await prisma.build.create({ data: { companyId: wsA, productId: productA, itemKey: "L1", branch: "aura/l1", correlationId: "c", createdBy: "t" } });
+    expect((await RunL.GET(req(), ctx({ id: wsB, buildId: foreignBuild.id }))).status).toBe(404);
+    await signIn(users.dev);
+    const ov = await json(await Learning.GET(req(), ctx({ id: wsA })));
+    expect(ov.body.data.feedback.map((f: { id: string }) => f.id)).toContain(fb.body.data.id);
+    expect(JSON.stringify(ov.body.data)).not.toContain(wsB);
+    expect((await FeedbackItem.PATCH(req("PATCH", { status: "DISABLED" }), ctx({ id: wsA, feedbackId: fb.body.data.id }))).status).toBe(200);
+    expect((await FeedbackItem.DELETE(req("DELETE"), ctx({ id: wsA, feedbackId: fb.body.data.id }))).status).toBe(200);
+    await prisma.build.delete({ where: { id: foreignBuild.id } });
+  });
+
+  it("delivery does not depend on the learning subsystem: emit and retrieval failures are swallowed", async () => {
+    const { emit } = await import("@/lib/learning/service");
+    const { learningContext } = await import("@/lib/learning/retrieval");
+    const spy = vi.spyOn(prisma.learningEvent, "create").mockRejectedValueOnce(new Error("learning store down"));
+    expect(await emit({ companyId: wsA, type: "build.started", key: `k-${stamp}` })).toBe(false);
+    spy.mockRestore();
+    const spy2 = vi.spyOn(prisma.failureAttribution, "findMany").mockRejectedValueOnce(new Error("down"));
+    const ctxL = await learningContext({ companyId: wsA, productId: productA, buildId: "x", itemKey: "T", kind: "BACKEND", stack: "node-web", title: "t", description: "", acceptance: [], files: [], requirements: [], signatures: [], currentFiles: [], failureCategories: [] });
+    spy2.mockRestore();
+    expect(ctxL).toMatchObject({ text: "", manifest: [], criteria: [] });
+  });
+});

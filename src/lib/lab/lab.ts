@@ -87,6 +87,17 @@ function check(rule: Rule, base: Record<string, Scorecard>, cand: Record<string,
   return { ok, b, c };
 }
 
+/** Categories whose pass rate dropped (baseline → candidate), from the scorecards' per-category breakdown. */
+export function categoryRegressions(base: Scorecard, cand: Scorecard) {
+  const out: string[] = [];
+  for (const [cat, b] of Object.entries(base.byCategory ?? {})) {
+    const c = cand.byCategory?.[cat];
+    if (!c || !b.denominator || !c.denominator) continue;
+    if ((c.value ?? 0) < (b.value ?? 0)) out.push(`${cat} ${b.numerator}/${b.denominator} → ${c.numerator}/${c.denominator}`);
+  }
+  return out;
+}
+
 export function decide(input: { success: Rule[]; regression: Rule[]; base: Record<string, Scorecard>; cand: Record<string, Scorecard>; securityRelevant: boolean }) {
   const reasons: string[] = [];
   const fmt = (x: number | null) => (x === null ? "n/a" : Number(x.toFixed(4)).toString());
@@ -98,6 +109,8 @@ export function decide(input: { success: Rule[]; regression: Rule[]; base: Recor
   for (const r of results.regression) if (r.ok === false) { reject = true; reasons.push(`regression: ${r.rule.split} ${r.rule.metric} ${fmt(r.b)} → ${fmt(r.c)} violates ${r.rule.op} ${r.rule.value}`); }
   const newCritical = input.cand.all.criticalFailures.filter((id) => !input.base.all.criticalFailures.includes(id));
   if (newCritical.length) { reject = true; reasons.push(`candidate falsely accepts defective changes it previously rejected: ${newCritical.join(", ")}`); }
+  // Per-category quality: a candidate may not regress ANY task category (unrelated categories included), whatever its aggregate.
+  for (const reg of categoryRegressions(input.base.all, input.cand.all)) { reject = true; reasons.push(`category regression: ${reg}`); }
   const hb = metricValue(input.base.heldout, "functional.casesPassed"), hc = metricValue(input.cand.heldout, "functional.casesPassed");
   if (hb !== null && hc !== null && hc < hb) { reject = true; reasons.push(`held-out casesPassed dropped ${fmt(hb)} → ${fmt(hc)}`); }
   const unmeasured = [...results.success, ...results.regression].filter((r) => r.ok === null).map((r) => `${r.rule.split} ${r.rule.metric}`);

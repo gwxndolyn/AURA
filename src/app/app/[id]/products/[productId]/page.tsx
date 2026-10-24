@@ -497,7 +497,7 @@ function TimelineTab({ base, version }: { base: string; version: number }) {
   );
 }
 
-interface RunRow { id: string; itemKey: string; status: string; phase: string; branch: string; attempt: number; maxRepairs: number; costUsd: number; createdAt: string; finishedAt: string | null; failure: string }
+interface RunRow { id: string; companyId: string; productId: string; itemKey: string; status: string; phase: string; branch: string; attempt: number; maxRepairs: number; costUsd: number; createdAt: string; finishedAt: string | null; failure: string }
 interface RunDetail extends RunRow {
   headSha: string | null; baseSha: string | null; summary: string; tokensIn: number; tokensOut: number; modelCalls: number; toolCalls: number; sandboxMs: number; changed: string[];
   budgetUsd: number; stopReason: string; impact: Impact; defects: { id: string; title: string; category: string; status: string; occurrences: number; commandRunId: string; fixedByCommandRunId: string | null }[];
@@ -587,6 +587,7 @@ function RunsTab({ companyId, productId, run, setRun, canAct, version }: { compa
               </div>
             </details>
           )}
+          <RunLearning companyId={r.companyId} productId={r.productId} buildId={r.id} itemKey={r.itemKey} canAct={canAct} />
           {r.stopReason && <p className="text-xs text-text-muted">Stopped early: {r.stopReason.replace(/_/g, " ")}</p>}
           <ImpactView impact={r.impact} />
           {r.changed.length > 0 && <section><div className="metric-label mb-1">Changed files</div><p className="mono text-xs text-text-muted">{r.changed.join(" · ")}</p></section>}
@@ -627,5 +628,38 @@ function GithubLink({ base, companyId }: { base: string; companyId: string }) {
       <div className="segmented" role="group" aria-label="Link mode"><button data-active={mode === "publish"} onClick={() => setMode("publish")}>Publish AURA&apos;s work there</button><button data-active={mode === "import"} onClick={() => setMode("import")}>Import its code</button></div>
       <button disabled={!choice} onClick={async () => { try { await fetchJSON(`${base}/github`, { method: "PUT", body: JSON.stringify({ fullName: choice, mode }) }); toast({ title: "Repository linked", level: "success" }); location.reload(); } catch (e) { toast({ title: "Link failed", description: (e as Error).message, level: "danger" }); } }} className="btn-primary btn-sm">Link</button>
     </div>
+  );
+}
+
+
+/** What the run learned from (retrieval explanation), its recorded outcome/attributions, and a correction box. */
+function RunLearning({ companyId, productId, buildId, itemKey, canAct }: { companyId: string; productId: string; buildId: string; itemKey: string; canAct: boolean }) {
+  const { data, refetch } = useQuery<{ retrieved: { source: string; label: string; status: string; reason: string }[]; outcome: { outcome: string; attempts: number } | null; attributions: { id: string; attempt: number; category: string; rootCause: string; status: string; verification: string }[] }>(`/api/companies/${companyId}/learning/runs/${buildId}`);
+  const { toast } = useApp();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function send(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await fetchJSON(`/api/companies/${companyId}/learning/feedback`, { method: "POST", body: JSON.stringify({ text, productId, itemKey, buildId }) });
+      toast({ title: "Correction saved", description: "It becomes concrete criteria/instructions for this product's next runs. You can review it under Engineering intelligence → Feedback.", level: "success" });
+      setText("");
+      refetch();
+    } catch (err) {
+      toast({ title: "Not saved", description: (err as Error).message, level: "danger" });
+    }
+    setBusy(false);
+  }
+  if (!data) return null;
+  return (
+    <details className="text-xs" data-testid="run-learning">
+      <summary className="cursor-pointer text-text-muted">Learning: {data.retrieved.length} item(s) retrieved for this run{data.attributions.length ? ` · ${data.attributions.length} failure cause(s) recorded` : ""}</summary>
+      <div className="mt-1 space-y-2">
+        {data.retrieved.length > 0 && <ul className="text-text-muted">{data.retrieved.map((m, i) => <li key={i}><Badge tone="neutral">{m.status.toLowerCase()}</Badge> {m.source}: {m.label} — {m.reason}</li>)}</ul>}
+        {data.attributions.length > 0 && <ul>{data.attributions.map((a) => <li key={a.id}>Attempt {a.attempt + 1}: <span className="font-medium">{a.category.replace(/_/g, " ")}</span> ({a.status.toLowerCase()}) — {a.rootCause} <span className="text-text-faint">[fix {a.verification.toLowerCase()}]</span></li>)}</ul>}
+        {canAct && <form onSubmit={send} className="flex gap-2"><input aria-label={`Correction for ${itemKey}`} className="input h-7 flex-1" placeholder="Tell AURA what is wrong (e.g. the mobile layout is broken)" value={text} onChange={(e) => setText(e.target.value)} minLength={3} maxLength={2000} required /><button disabled={busy || text.trim().length < 3} className="btn-secondary btn-sm">Save correction</button></form>}
+      </div>
+    </details>
   );
 }

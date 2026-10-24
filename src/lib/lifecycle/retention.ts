@@ -16,6 +16,7 @@ import { workRoot } from "@/lib/builder/workspace";
 import { purgeExpiredRevocations } from "@/lib/auth/session";
 import { recoverReservations } from "@/lib/billing/entitlements";
 import { log } from "@/lib/observability/log";
+import { processPending } from "@/lib/learning/service";
 
 export async function purgeWorkspaceOutput(companyId: string, retentionDays: number, now = new Date()) {
   const before = new Date(now.getTime() - retentionDays * 86400_000);
@@ -59,6 +60,8 @@ export async function runMaintenance(now = new Date()) {
   out.tokensPurged = (await prisma.passwordResetToken.deleteMany({ where: { OR: [{ expiresAt: { lt: now } }, { usedAt: { lt: new Date(now.getTime() - 86400_000) } }] } })).count;
   out.reservationsReleased = await recoverReservations(now);
   out.orphanTreesRemoved = await cleanOrphanTrees();
+  // Learning runs in the background: delivery never waits for it, and a failure here only delays insights.
+  out.learningEventsProcessed = await processPending(500).catch(() => 0);
   log("info", "maintenance.done", out);
   return out;
 }

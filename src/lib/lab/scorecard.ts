@@ -15,6 +15,8 @@ export interface Scorecard {
   split: string;
   dimensions: Record<string, Record<string, Metric>>;
   criticalFailures: string[]; // benchmark ids that falsely ACCEPTED a bad change (never averaged away)
+  /** Pass rate per benchmark category (so a regression in one category is never hidden by an aggregate gain). */
+  byCategory?: Record<string, Metric>;
   notMeasured: { dimension: string; reason: string }[];
 }
 
@@ -65,6 +67,7 @@ export function scorecard(cases: CaseOutcome[], split = "all"): Scorecard {
       },
     },
     criticalFailures: bad.filter((c) => c.measures.decision === "accept").map((c) => c.benchmarkId),
+    byCategory: Object.fromEntries([...new Set(ran.map((c) => c.category))].map((cat) => { const xs = ran.filter((c) => c.category === cat); return [cat, m(xs.filter((c) => c.status === "PASSED").length, xs.length, `${cat} benchmarks passed / run`)]; })),
     notMeasured: [
       { dimension: "customerExperience", reason: "no real user feedback or onboarding telemetry is collected by the lab" },
       { dimension: "economics.providerCost", reason: "lab benchmarks make no model calls; provider cost is measured by the intelligence evaluations and real runs" },

@@ -41,12 +41,14 @@ import { buildIndex, indexSnapshot, analyzeChange, focusedTestCommand, isTestFil
 import { recordAttempt, diagnosisBrief, abandonOpen, repeatDecision, type DefectView } from "./debug";
 import { gateVerdict, GATE_POLICIES, DEFAULT_GATE_POLICY, V1_REASON_CODES } from "./verdict";
 import { contextFiles, DEFAULT_CONTEXT_STRATEGY } from "./intel";
-import { remember, retrieve, renderMemory, markStale } from "@/lib/factory/memory";
+import { remember, retrieve, markStale } from "@/lib/factory/memory";
 import type { ModelTier } from "@/lib/types";
 import { clampLimits, type Limits } from "@/lib/factory/policy";
 import { integrationBase } from "@/lib/factory/base";
 import { verifyInBrowser, evidenceRoot, browserBrief, type BrowserResult } from "./browser";
 import { join } from "node:path";
+import { learningContext, recordRecipeUse } from "@/lib/learning/retrieval";
+import { emit as emitLearning } from "@/lib/learning/service";
 import { assessRisk, reviewPlan, handoffFor, recoveryFor, resolveDisagreement, contextPackage, type ReviewPlan, type ReviewOutcome } from "./orchestrator";
 
 type BuildRow = NonNullable<Awaited<ReturnType<typeof prisma.build.findFirst>>>;
@@ -204,7 +206,7 @@ const ASKS: Record<string, ["qa" | "security" | "review", string]> = {
  * implicit approval). Disagreements are resolved on evidence, never on
  * confidence, and recorded.
  */
-async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaited<ReturnType<typeof verify>>, impact: Impact | null, risk: string, plan: ReviewPlan) {
+async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaited<ReturnType<typeof verify>>, impact: Impact | null, risk: string, plan: ReviewPlan & { extraInstructions?: string[] }) {
   const diff = await diffText(tree);
   const evidence = ver.results.map((r) => `$ ${r.command}\nexit ${r.exitCode} — ${r.summary}\n${r.output.slice(-2500)}`).join("\n\n");
   const imp = impact ? `\n\n# Static change-impact analysis (${impact.parser} parser; file-level)\nDependents: ${impact.dependents.join(", ") || "none"}\nTests covering the change: ${impact.tests.join(", ") || "none"}\n${impact.flags.map((f) => `- [${f.confidence}/${f.severity}] ${f.kind}: ${f.detail}`).join("\n") || "No risks flagged."}` : "";
@@ -216,7 +218,7 @@ async function review(b: BuildRow, tree: Tree, acceptance: string[], ver: Awaite
     const [source, ask] = ASKS[agentKey];
     await checkpoint(b, b.jobId);
     await event(b, `${getAgentDef(agentKey)?.name ?? agentKey} is reviewing ${b.itemKey}`, "info", agentKey);
-    const objective = `${ask}\n\nYou may read files with the tools. Finish with ONE JSON object: {"verdict":"approve"|"request_changes","criteria":[{"text","status","evidence"}],"findings":[{"severity","title","detail","evidence","blocking"}],"confidence","notVerified":[]}${source === "qa" ? "" : ' (criteria may be [])'}.`;
+    const objective = `${ask}${source === "review" && plan.extraInstructions?.length ? `\nThe user asked for: ${plan.extraInstructions.join(" ")}` : ""}\n\nYou may read files with the tools. Finish with ONE JSON object: {"verdict":"approve"|"request_changes","criteria":[{"text","status","evidence"}],"findings":[{"severity","title","detail","evidence","blocking"}],"confidence","notVerified":[]}${source === "qa" ? "" : ' (criteria may be [])'}.`;
     let r = await agentTurn(b, { agentKey, tier: tierFor(agentKey, getAgentDef(agentKey)?.tier ?? "STANDARD", { risk }), objective, context: base, tools: READ_TOOLS, writeScope: [], tree, maxTurns: 12, jobId: b.jobId });
     let parsed = ReviewSchema.safeParse(extractJson(r.text));
     if (!parsed.success) {
@@ -289,8 +291,9 @@ export async function runBuild(buildId: string, jobId: string | null) {
   try {
     return await runBuildInner(buildId, jobId);
   } finally {
-    const s = await prisma.build.findUnique({ where: { id: buildId }, select: { status: true } });
+    const s = await prisma.build.findUnique({ where: { id: buildId }, select: { status: true, companyId: true, productId: true, itemKey: true } });
     if (!s || !["QUEUED", "RUNNING"].includes(s.status)) await settle(`build:${buildId}`, "concurrent_build", null).catch(() => null);
+    if (s && !["QUEUED", "RUNNING"].includes(s.status)) await emitLearning({ companyId: s.companyId, type: "build.finished", key: `finished:${buildId}:${s.status}`, productId: s.productId, buildId, itemKey: s.itemKey, payload: { status: s.status } });
   }
 }
 
@@ -348,13 +351,32 @@ async function runBuildInner(buildId: string, jobId: string | null) {
     const inputs = handoffFor(item.key, item.parentKey, upstream);
     // QA verifies the task's own criteria AND the design/contract lines addressed to it.
     const verifyCriteria = [...acceptance, ...inputs.extraAcceptance.filter((x) => !acceptance.includes(x))];
+    // Learning context (memory, failed approaches, recipes, the user's corrections). Never blocks the run.
+    const learnArgs = { companyId: b.companyId, productId: product.id, buildId: b.id, itemKey: item.key, kind: item.kind, stack: product.stack, title: item.title, description: item.description, acceptance, files: scope, requirements };
+    const firstLearning = await learningContext({ ...learnArgs, signatures: [], currentFiles: [], failureCategories: [] });
+    for (const c of firstLearning.criteria) if (!verifyCriteria.includes(c)) verifyCriteria.push(c);
+    const reviewPlanWithFeedback = { ...plan, extraInstructions: firstLearning.reviewerInstructions };
+    await recordRecipeUse(b.companyId, product.id, b.id, item.key, firstLearning.recipeIds);
+    await emitLearning({ companyId: b.companyId, type: "build.started", key: `build.started:${b.id}`, productId: product.id, buildId: b.id, itemKey: item.key, payload: { attempt: b.attempt } });
     const orchestration: Record<string, unknown> = { risk: assessed.risk, plannedRisk: item.risk, riskReasons: assessed.reasons, reviewers: plan.reviewers, requireApproveVerdict: plan.requireApproveVerdict, reviewPolicy: plan.why, gatePolicy: gatePolicyId, inputs: { design: inputs.design?.ref ?? null, architecture: inputs.architecture?.ref ?? null, extraCriteria: inputs.extraAcceptance.length }, attempts: [] as unknown[] };
     await update(b, { orchestration: JSON.stringify(orchestration) });
     // Codebase intelligence for the starting point of this run (persisted per commit, reused across runs).
     const baseFiles = await allFiles(tree);
     const before = await indexSnapshot(b.companyId, repo.id, tree.baseSha, baseFiles);
     const protectedTests = before.files.filter((f) => isTestFile(f.path)).map((f) => f.path);
-    let feedback = "";
+    let lastChanged: string[] = [];
+    let lastImpact: Impact | null = null;
+    let lastKnown: string[] = [];
+    const attemptPayload = (attempt: number, passed: boolean, extra: { findings?: Finding[]; unmet?: Criterion[] } = {}) => ({
+      attempt, passed, changed: lastChanged, plannedFiles: scope, knownFiles: lastKnown.slice(0, 400), ownerAgent: owner,
+      findings: (extra.findings ?? []).map((f) => ({ source: f.source, severity: f.severity, title: f.title, detail: f.detail.slice(0, 400), evidence: f.evidence.slice(0, 300), blocking: f.blocking })),
+      unmet: (extra.unmet ?? []).map((c) => ({ text: c.text, evidence: c.evidence.slice(0, 300) })),
+      impactFlags: (lastImpact?.flags ?? []).map((f) => ({ kind: f.kind, confidence: f.confidence, detail: f.detail.slice(0, 300) })),
+    });
+    // Task memory: a resumed run (worker crash, retry) continues from the recorded feedback instead of starting blind.
+    const taskMem = parseJSON<{ feedback?: string; approaches?: { attempt: number; strategy: string; outcome: string }[] }>(b.taskMemory, {});
+    let feedback = b.attempt > 0 && taskMem.feedback ? taskMem.feedback : "";
+    const approaches = taskMem.approaches ?? [];
     let escalate = false;
     let lastTree: string | null = null;
     let openSigs: string[] = [];
@@ -364,7 +386,8 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       await checkpoint(b, jobId);
       await update(b, { attempt, phase: attempt === 0 ? "implement" : "repair" });
       const snap = await snapshot(tree);
-      const memory = renderMemory(await retrieve(b.companyId, product.id, { files: scope, requirements, signatures: openSigs, text: `${item.title} ${item.description}` }));
+      const learned = attempt === b.attempt && !openSigs.length ? firstLearning : await learningContext({ ...learnArgs, signatures: openSigs, currentFiles: snap.files, failureCategories: [...new Set(approaches.map((x) => x.strategy))] });
+      await update(b, { retrievalManifest: JSON.stringify(learned.manifest) });
       // Task-specific context package; every section carries provenance (recorded on the run).
       const pkg = contextPackage([
         { id: "product", title: "Product", body: `${product.title}\n${product.idea}`, provenance: `product ${product.id} (user request)` },
@@ -376,7 +399,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
         { id: "repo", title: "Repository", body: repoContext(stack.conventions, snap), provenance: `working tree of ${b.branch} (live files)` },
         { id: "relevant", title: "Relevant files", body: relevantContext(before, baseFiles, `${item.title} ${item.description} ${acceptance.join(" ")} ${scope.join(" ")}`), provenance: `code index @ ${tree.baseSha.slice(0, 8)} (current source)` },
         { id: "codemap", title: `Code map (static index, ${before.parser} parser)`, body: `Routes: ${before.routes.map((r) => `${r.method} ${r.path} → ${r.file}`).join("; ") || "none"}\nTests: ${before.tests.map((t) => t.file).join(", ") || "none"}`, provenance: `code index @ ${tree.baseSha.slice(0, 8)}` },
-        !!memory && { id: "memory", title: "Project memory", body: memory.replace(/^# [^\n]*\n/, ""), provenance: "ProjectMemory (VERIFIED entries are facts from passing runs; ASSUMPTION entries are not)" },
+        !!learned.text && { id: "learning", title: "What AURA knows about this task (memory, failed approaches, recipes, user corrections)", body: learned.text, provenance: `learning retrieval: ${learned.manifest.length} item(s), see retrievalManifest` },
         !!feedback && { id: "feedback", title: "What failed last time (real output and evidence — fix the cause, do not weaken or delete existing tests)", body: feedback, provenance: `attempt ${attempt} verification + review of build ${b.id.slice(-6)}` },
       ]);
       const ctx = pkg.text;
@@ -411,6 +434,9 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       const after = await buildIndex(afterFiles);
       const impact = analyzeChange({ before, after, beforeFiles: baseFiles, afterFiles, changed, scope, protectedTests, failingTests: failingTestFiles });
       await update(b, { impact: JSON.stringify(impact) });
+      lastChanged = changed.map((c) => c.path);
+      lastImpact = impact;
+      lastKnown = after.files.map((f) => f.path);
       await checkpoint(b, jobId);
       await event(b, `Verifying ${b.itemKey} in the sandbox${impact.tests.length ? ` (${impact.tests.length} impacted test file(s) first, then the full suite)` : ""}`, "info", "qa-engineer");
       const ver = await verify(b, tree, focusedTestCommand(after, impact.tests));
@@ -426,7 +452,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       await update(b, { phase: "review" });
       // Browser verification of the rendered app (UI-visible changes only, after the tests pass). Unavailable ≠ passed.
       let browserRes: BrowserResult | null = null;
-      if (ver.passed && !confirmed.length && uiVisible(item.kind, changed.map((c) => c.path))) {
+      if (ver.passed && !confirmed.length && (uiVisible(item.kind, changed.map((c) => c.path)) || firstLearning.browserRequired)) {
         await event(b, `Rendering ${b.itemKey} in a real browser (desktop + mobile)`, "info", "qa-engineer");
         browserRes = await verifyInBrowser({ treeDir: tree.dir, buildId: b.id, files: after.files.map((f) => f.path), apiRoutes: after.routes, evidenceDir: join(evidenceRoot(), b.companyId, b.id, `attempt-${attempt}`) });
         await update(b, { browser: JSON.stringify({ ...browserRes, attempt }) });
@@ -436,7 +462,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       const browserEvidence = browserRes && browserRes.status !== "unavailable" ? `\n\n# Browser verification (real Chromium; observations)\nStatus: ${browserRes.status}\n${browserRes.routes.map((r) => `- ${r.route} @ ${r.viewport}: HTTP ${r.httpStatus}`).join("\n")}\n${browserRes.journeys.map((j) => `- journey "${j.name}": ${j.status} — ${j.detail}`).join("\n")}\n${browserRes.findings.map((f) => `- [${f.kind}] ${f.route} @ ${f.viewport}: ${f.detail}`).join("\n") || "- no findings"}` : browserRes ? `\n\n# Browser verification\nNOT RUN: ${browserRes.reason}. Browser-visible criteria cannot be 'met' from browser evidence.` : "";
       ver.browserEvidence = browserEvidence;
       const rv = ver.passed && !confirmed.length
-        ? await review(b, tree, verifyCriteria, ver, impact, assessed.risk, plan)
+        ? await review(b, tree, verifyCriteria, ver, impact, assessed.risk, reviewPlanWithFeedback)
         : { criteria: verifyCriteria.map((text) => ({ text, status: "unverified" as const, evidence: ver.passed ? "not reviewed: impact analysis found confirmed breakage" : "verification failed before review" })), findings: [] as Finding[], decision: null, outcomes: [] };
       const verFindings: Finding[] = ver.results.filter((r) => !r.ok).map((r) => ({ source: "verification", severity: "high", title: `${r.id} failed: ${r.command}`, detail: r.summary, evidence: `command run ${r.commandRunId}`, blocking: true }));
       if (!ver.hasTest) verFindings.push({ source: "verification", severity: "high", title: "No test command", detail: ver.notes.join(" "), evidence: "package.json", blocking: true });
@@ -446,7 +472,10 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       const policy = GATE_POLICIES[gatePolicyId];
       const gv = gateVerdict(policy, { results: ver.results, hasTest: ver.hasTest, impact, task: `${item.title}\n${item.description}\n${acceptance.join("\n")}`, beforeFiles: baseFiles, afterFiles });
       const gateFindings: Finding[] = gv.reasons.filter((r) => !V1_REASON_CODES.includes(r.code)).map((r) => ({ source: "verification", severity: "high", title: `gate ${policy.id}: ${r.code.replace(/_/g, " ")}`, detail: r.detail, evidence: "deterministic verification gate", blocking: true }));
-      const findings = [...verFindings, ...impFindings, ...gateFindings, ...browserFindings, ...rv.findings];
+      // The user asked for strict scope: changes outside the planned files (and their tests) block.
+      const outOfScope = firstLearning.scopeStrict && scope.length ? changed.map((c) => c.path).filter((p) => !scope.includes(p) && !isTestFile(p) && p !== "package-lock.json") : [];
+      const scopeFindings: Finding[] = outOfScope.length ? [{ source: "review", severity: "medium", title: "Changes outside the task's files", detail: `The user asked AURA not to change unrelated files; this attempt changed ${outOfScope.join(", ")}`, evidence: `diff: ${outOfScope.join(", ")}`, blocking: true }] : [];
+      const findings = [...verFindings, ...impFindings, ...gateFindings, ...browserFindings, ...scopeFindings, ...rv.findings];
       const blocking = findings.filter((f) => f.blocking);
       const unmet = rv.criteria.filter((c) => c.status !== "met");
       await update(b, { criteria: JSON.stringify(rv.criteria), findings: JSON.stringify(findings) });
@@ -457,6 +486,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
         await update(b, { status: "VERIFIED", phase: "done", headSha: c.sha, summary: ver.results.map((r) => `${r.command}: ${r.summary}`).join("; "), finishedAt: new Date() });
         await event(b, `${b.itemKey} verified and committed to ${b.branch} (${c.sha.slice(0, 8)})`, "success", "devops");
         await learn(b, { productId: product.id, item: { key: item.key, title: item.title }, requirements, sha: c.sha, ver, impact, fixed: att.fixed, after, afterFiles });
+        await emitLearning({ companyId: b.companyId, type: "attempt.completed", key: `attempt:${b.id}:${attempt}`, productId: product.id, buildId: b.id, itemKey: item.key, payload: { ...attemptPayload(attempt, true), passed: true } });
         return { status: "VERIFIED", sha: c.sha };
       }
       const prior = (await retrieve(b.companyId, product.id, { signatures: openSigs, limit: 4 })).filter((m) => m.kind === "defect_solution").map((m) => ({ content: m.content, ref: `memory ${m.id.slice(-6)}` }));
@@ -464,6 +494,8 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       const recovery = att.open.length ? recoveryFor(att.open, attempt) : { action: "repair" as const, strategy: blocking.length ? "review_findings" : "unproven_criteria", tier: "same" as const, brief: blocking.length ? "Strategy (review findings): address each evidenced blocking finding below; do not argue with evidence in code." : "Strategy (unproven criteria): the code may be right but the criteria are not proven — add or fix tests that exercise each unproven criterion through the real API." };
       (orchestration.attempts as unknown[]).push({ attempt, passed: ver.passed, defects: att.open.map((d) => ({ category: d.category, occurrences: d.occurrences })), blocking: blocking.length, unmet: unmet.length, recovery: recovery.strategy, browser: browserRes ? { status: browserRes.status, findings: browserRes.findings.filter((f) => f.blocking).map((f) => `${f.kind} ${f.route}@${f.viewport}`), journeys: browserRes.journeys.map((j) => `${j.name}: ${j.status}`) } : null, decision: rv.decision?.rationale ?? null, disagreement: rv.decision?.disagreement ?? false, reviewers: rv.outcomes });
       await update(b, { orchestration: JSON.stringify(orchestration) });
+      approaches.push({ attempt, strategy: recovery.strategy, outcome: "failed" });
+      await emitLearning({ companyId: b.companyId, type: "attempt.completed", key: `attempt:${b.id}:${attempt}`, productId: product.id, buildId: b.id, itemKey: item.key, payload: attemptPayload(attempt, false, { findings, unmet }) });
       if (recovery.action === "retry_later") throw new JobError(`${recovery.brief}`, true, "sandbox_infrastructure");
       if ("tier" in recovery && recovery.tier === "escalate") escalate = true;
       feedback = [
@@ -474,6 +506,8 @@ async function runBuildInner(buildId: string, jobId: string | null) {
         ...blocking.filter((f) => !["verification", "impact"].includes(f.source)).map((f) => `[${f.source}] ${f.title}: ${f.detail} (evidence: ${f.evidence})`),
         ...unmet.map((c) => `Criterion not proven: ${c.text} — ${c.evidence}`),
       ].filter(Boolean).join("\n\n").slice(0, 20_000);
+      // Persist task memory so another worker can resume this investigation (feedback + approaches tried).
+      await update(b, { taskMemory: JSON.stringify({ feedback, approaches, updatedAt: new Date().toISOString() }) });
       await event(b, `${b.itemKey} did not pass verification (attempt ${attempt + 1}): ${[...ver.results.filter((r) => !r.ok).map((r) => r.id), ...(blocking.length ? [`${blocking.length} blocking finding(s)`] : []), ...(unmet.length ? [`${unmet.length} criteria not proven`] : [])].join(", ")}`, "warning", "qa-engineer");
       // Repeated-failure detection: the same failure again → escalate once, then stop.
       const rd = repeatDecision(att.open, att.recurring);
@@ -493,6 +527,7 @@ async function runBuildInner(buildId: string, jobId: string | null) {
   } catch (e) {
     const err = e as JobError & { kind?: string; retryable?: boolean };
     const kind = err.kind ?? "internal";
+    if (kind !== "cancelled") await emitLearning({ companyId: b.companyId, type: "attempt.completed", key: `attempt:${b.id}:${b.attempt}:error:${kind}`, productId: b.productId, buildId: b.id, itemKey: b.itemKey, payload: { attempt: b.attempt, passed: false, changed: [], plannedFiles: [], findings: [], unmet: [], impactFlags: [], knownFiles: [], ownerAgent: "", error: { kind, message: err.message.slice(0, 500) } } });
     const terminal = kind === "cancelled" ? "CANCELLED" : err.retryable ? "QUEUED" : "BLOCKED";
     if (terminal !== "QUEUED") await abandonOpen(b.id);
     await update(b, { status: terminal, phase: terminal === "QUEUED" ? "queued" : "done", failure: err.message.slice(0, 2000), stopReason: kind === "budget" ? "budget" : b.stopReason, ...(terminal === "QUEUED" ? {} : { finishedAt: new Date() }) });

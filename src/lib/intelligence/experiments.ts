@@ -21,6 +21,7 @@ import { runEvaluation, loadEvaluationRun, EvaluationError, EVAL_LIMITS } from "
 import { compareRuns, summarizeVariance, type ComparisonResult } from "./compare";
 import { evaluateGates, DEFAULT_GATE_CONFIG, type GateConfig, type GateReport } from "./gates";
 import { verifyIntegrity } from "./registry";
+import { emit as emitLearning } from "@/lib/learning/service";
 import { getDataset } from "./datasets";
 import type { EvaluationRun } from "./types";
 
@@ -185,8 +186,11 @@ export async function promoteVersion(input: PromoteInput): Promise<PromoteResult
   if (softFail && !input.waiveSoftGates) blockedReasons.push("cost/latency tolerance exceeded — requires an explicit waiver");
   if (candidate.status === "EVALUATING" && !input.waiveSoftGates) blockedReasons.push("candidate is not APPROVED by an experiment");
   if (regression.status !== "COMPLETED" || regression.run.total === 0) blockedReasons.push(`regression evaluation did not complete (${regression.stopReason ?? "no evaluated cases"})`);
+  // V11: simulated provider output measures the harness, not the model — it can never justify a production prompt change.
+  const simulated = regression.run.mode === "simulation" && process.env.AURA_ALLOW_SIMULATED_PROMOTION !== "1";
+  if (simulated) blockedReasons.push("evaluation ran on the simulated provider; a prompt can only be promoted on live-model evidence");
 
-  const allowed = !hardFail && !needsBaseline && (!softFail || input.waiveSoftGates) && (candidate.status === "APPROVED" || input.waiveSoftGates) && regression.status === "COMPLETED" && regression.run.total > 0;
+  const allowed = !simulated && !hardFail && !needsBaseline && (!softFail || input.waiveSoftGates) && (candidate.status === "APPROVED" || input.waiveSoftGates) && regression.status === "COMPLETED" && regression.run.total > 0;
 
   if (!allowed) {
     await prisma.promptPromotion.create({
@@ -221,6 +225,7 @@ export async function promoteVersion(input: PromoteInput): Promise<PromoteResult
       },
     }),
   ]);
+  await emitLearning({ companyId: input.companyId, type: "prompt.promoted", key: `prompt.promoted:${candidate.id}`, payload: { template: candidate.template.key, from: current?.id ?? null, to: candidate.id } });
   await audit(input.companyId, input.actor, "PROMPT_PROMOTED", candidate.id, `${candidate.template.key} v${current?.version ?? "-"} → v${candidate.version}${input.waiveSoftGates ? " (waiver)" : ""}`);
   await emitEvent({ companyId: input.companyId, type: "PROMPT_PROMOTED", actor: candidate.template.agentKey, level: "success", message: `${candidate.template.key} v${candidate.version} is now active` });
   return { promoted: true, gates, regressionEvaluationId: regression.evaluationId, activeVersionId: candidate.id, blockedReasons: [] };
@@ -252,6 +257,7 @@ export async function rollbackVersion(input: { companyId: string; templateKey: s
       },
     }),
   ]);
+  await emitLearning({ companyId: input.companyId, type: "prompt.rolled_back", key: `prompt.rolled_back:${target.id}:${Date.now()}`, payload: { template: template.key, from: current?.id ?? null, to: target.id, reason: input.reason } });
   await audit(input.companyId, input.actor, "PROMPT_ROLLBACK", target.id, `${template.key} v${current?.version ?? "-"} → v${target.version}: ${input.reason}`.slice(0, 500));
   await emitEvent({ companyId: input.companyId, type: "PROMPT_PROMOTED", actor: template.agentKey ?? undefined, level: "warning", message: `${template.key} rolled back to v${target.version}` });
   return { activeVersionId: target.id, rolledBackVersionId: current?.id ?? null };

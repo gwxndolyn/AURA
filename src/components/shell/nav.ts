@@ -1,5 +1,6 @@
 import {
   Microscope,
+  Lightbulb,
   Bot,
   LayoutDashboard,
   Building2,
@@ -72,6 +73,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/analytics", label: "Analytics", icon: BarChart3, lab: true },
       { href: "/intelligence", label: "AI Evaluation", icon: FlaskConical },
+      { href: "/learning", label: "Engineering intelligence", icon: Lightbulb },
       { href: "/engineering-lab", label: "Engineering Lab", icon: Microscope },
       { href: "/autopilot", label: "Autopilot", icon: Bot },
       { href: "/activity", label: "Activity & Audit", icon: Activity },

@@ -1,10 +1,28 @@
 # Implementation status ledger
 
 The recovery point for continuing work. Each row says where the code is, what
-was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft).
+was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft, V11 learning).
 
 Status: **Verified** (tests run and passing) · **Implemented, unverified** ·
 **Partial** · **Blocked** (needs credentials/infrastructure) · **Not implemented**.
+
+## Learning from builds — AURA V11 (2026-10-24)
+
+Design: [architecture/learning.md](architecture/learning.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| Outcome-linked records per run (prompt refs, models, files, executed tests, criteria, findings, defects, attempts, outcome class) | `learning/service.ts` `RunOutcome` | Verified | eval scenario 12; V10 benchmark (3 runs, 4/4 tests executed) | Model config = model id only | — |
+| Idempotent durable learning events, crash-safe processing | `LearningEvent`, `processPending`, worker maintenance, `learning.process` job | Verified | eval 12 (duplicate emit no-op, claimed-but-unprocessed event retried) | Polling, no push | — |
+| Scoped memory: project (existing), task (`Build.taskMemory`, resumed), reusable recipes, agent performance, user feedback | `factory/memory.ts`, engine, `learning/*` | Verified | eval 1–4, 7–9; benchmark asserts task memory | Reusable knowledge is authored/discovered recipes, not free text | Discover recipes from repeated defect solutions |
+| Evidence-based failure attribution (taxonomy, scope, root cause vs symptoms, confidence, UNKNOWN, fix verification) | `learning/attribution.ts` (rules `attr-1`) | Verified | eval 5 (8/8 labelled cases), 6, 7; benchmark: browser defect → `architecture_contract`, fix VERIFIED | Rule-based; no model-assisted investigation | Model-assisted hypothesis ranking, evaluated |
+| Recipes with applicability + honest validation | `learning/recipes.ts` | Verified | eval 4; benchmark: recipes offered and outcomes recorded | 7 authored recipes, all UNVALIDATED at start | Accumulate applications |
+| Retrieval with precedence, negative knowledge, stale/missing-file exclusion, manifest | `learning/retrieval.ts`, engine | Verified | eval 1–3, 7–9; run view shows manifest | Lexical relevance (no embeddings) | Measure precision on real runs |
+| Agent performance with explicit denominators/exclusions | `agentPerformance` | Verified | eval 12 | — | — |
+| Controlled optimization: problems → bounded DRAFT → A/B → gated promotion → rollback; simulated evidence cannot promote; per-category regression rejects lab candidates | `learning/optimize.ts`, `intelligence/experiments.ts`, `lab/lab.ts` | Verified | eval 10, 11; intelligence workflow test (simulated promotion blocked) | **No live-model A/B run** (no key) | Run `evaluate` with a live key, ≥ 3 repetitions |
+| User feedback → criteria / instructions / browser / scope / reviewer actions; editable; scoped | `learning/feedback.ts`, routes, run view, workspace | Verified | eval 9; commercial suite (authz, isolation, CRUD) | Rule-based classification | — |
+| Engineering-intelligence workspace | `/app/[id]/learning`, `/api/companies/[id]/learning/*` | Implemented; API verified; `next build` passes | commercial suite | UI not e2e-tested | e2e spec |
+| Delivery independent of learning | emit/retrieval failure-tolerant | Verified | commercial suite (store down → build continues) | — | — |
 
 ## Product craft + agent team — AURA V9/V10 (2026-10-24)
 

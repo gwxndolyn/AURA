@@ -69,6 +69,7 @@ The doc validator checks that everything in `.env.example` appears here.
 | `AURA_DEPLOY_ENV_ALLOWLIST` | Single-tenant self-hosting: server env names deployments may read (default none — tenant secrets only) | `deploy/service.ts` |
 | `AURA_BROWSER_VERIFY` | `0` disables browser verification (reported as not run) | `builder/browser.ts` |
 | `AURA_EVIDENCE_ROOT` | Directory for browser screenshots (default OS temp) | `builder/browser.ts` |
+| `AURA_ALLOW_SIMULATED_PROMOTION` | Automated tests only: lets a prompt be promoted on simulated-provider evidence (never set in production) | `intelligence/experiments.ts` |
 | `AURA_MAINTENANCE_INTERVAL_MS` | Worker maintenance tick (retention, quota-hold recovery, token purge); default 15 min | `jobs/worker.ts` |
 
 ## Named by configuration (you choose the names)

@@ -183,6 +183,11 @@ model Company {
   invoices        Invoice[]
   usageCounters   UsageCounter[]
   reservations    UsageReservation[]
+  learningEvents  LearningEvent[]
+  runOutcomes     RunOutcome[]
+  attributions    FailureAttribution[]
+  recipeUses      RecipeApplication[]
+  feedback        UserFeedback[]
 
   @@index([ownerId])
 }
@@ -1547,6 +1552,10 @@ model Build {
   contextManifest String @default("[]")
   // Last browser verification (src/lib/builder/browser.ts): {status, reason?, routes[], findings[], journeys[]} — observations only.
   browser String @default("{}")
+  // Task memory (resumable): per-attempt feedback, approaches tried and their outcome — restored when a run resumes.
+  taskMemory String @default("{}")
+  // Which memories/recipes/preferences were retrieved for the last attempt and why: [{source, ref, kind, status, reason, score}].
+  retrievalManifest String @default("[]")
   container   String?  // name of the sandbox container currently executing (cancellation kills it)
   correlationId String
   createdBy   String
@@ -2124,4 +2133,165 @@ model ProductDeployment {
 
   @@index([companyId, productId, createdAt])
   @@index([targetId, status])
+}
+
+
+// ---------------------------------------------------------------------------
+// Learning from builds (AURA V11, src/lib/learning). Every row is derived from
+// recorded engine outcomes; nothing here is written from free-form model text.
+// ---------------------------------------------------------------------------
+
+// Durable, idempotent learning event log (key = stable identity; retried emits are no-ops).
+model LearningEvent {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key         String    @unique
+  type        String    // build.started | attempt.completed | build.finished | plan.approved | delivered | rework.requested | feedback.recorded | benchmark.completed | prompt.promoted | prompt.rolled_back
+  productId   String?
+  buildId     String?
+  itemKey     String?
+  payload     String    @default("{}")
+  processedAt DateTime?
+  attempts    Int       @default(0)
+  error       String    @default("")
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId, processedAt, createdAt])
+}
+
+// One structured outcome per engineering run (upserted; recomputed idempotently from the run's records).
+model RunOutcome {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId      String
+  buildId        String   @unique
+  itemKey        String
+  taskKind       String
+  stack          String   @default("")
+  ownerAgent     String
+  promptRefs     String   @default("[]") // distinct AgentRun.promptRef used in the run
+  models         String   @default("[]")
+  risk           String   @default("")
+  requirement    String   @default("{}") // {title, acceptance[], requirements[]}
+  files          String   @default("[]") // changed paths
+  tests          String   @default("[]") // [{command, purpose, exitCode, timedOut, ran}]
+  testsRun       Int      @default(0)
+  testsPassed    Int      @default(0)
+  criteriaTotal  Int      @default(0)
+  criteriaMet    Int      @default(0)
+  reviewFindings Int      @default(0)
+  securityFindings Int    @default(0)
+  browserStatus  String   @default("not_applicable") // passed | failed | unavailable | not_applicable
+  defects        String   @default("[]") // [{signature, category, status, occurrences}]
+  attempts       Int      @default(1)
+  firstPassSuccess Boolean @default(false)
+  // VERIFIED | FAILED | BLOCKED | CANCELLED | INFRA_FAILED | BUDGET_STOPPED — infrastructure and cancellations are never counted as agent failures
+  outcome        String
+  outcomeClass   String   @default("") // agent | environment | external | user | budget
+  reworkRequested Boolean @default(false)
+  regression     Boolean  @default(false)
+  recipeKeys     String   @default("[]")
+  costUsd        Float    @default(0)
+  tokens         Int      @default(0)
+  durationMs     Int      @default(0)
+  finishedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([companyId, productId, createdAt])
+  @@index([companyId, ownerAgent, taskKind])
+}
+
+// Evidence-based failure attribution for one failed attempt (or a rework request).
+model FailureAttribution {
+  id               String    @id @default(cuid())
+  companyId        String
+  company          Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId        String
+  buildId          String
+  itemKey          String
+  attempt          Int
+  category         String    // see ATTRIBUTION_CATEGORIES in src/lib/learning/attribution.ts
+  scope            String    // agent | workflow | environment | external | unknown
+  agentKey         String?
+  promptRef        String?
+  rootCause        String
+  symptoms         String    @default("[]")
+  evidence         String    @default("[]") // [{kind, ref, detail}]
+  confidence       String    // low | medium | high
+  status           String    // ESTABLISHED | HYPOTHESIS | UNKNOWN
+  correctiveAction String    @default("")
+  verification     String    @default("PENDING") // PENDING | VERIFIED | FAILED | NOT_APPLICABLE
+  rulesVersion     String
+  createdAt        DateTime  @default(now())
+  resolvedAt       DateTime?
+
+  @@unique([buildId, attempt, category])
+  @@index([companyId, productId, createdAt])
+}
+
+// Engineering recipes. scope = "platform" (authored by AURA, no customer content) or a companyId (discovered in that workspace only).
+model EngineeringRecipe {
+  id           String   @id @default(cuid())
+  scope        String
+  key          String
+  version      Int      @default(1)
+  title        String
+  category     String
+  appliesTo    String   @default("{}") // {stacks[], kinds[], keywords[], failureCategories[]}
+  preconditions String  @default("[]")
+  investigation String  @default("[]")
+  approach     String
+  failureModes String   @default("[]")
+  verification String   @default("[]")
+  limitations  String   @default("[]")
+  status       String   @default("UNVALIDATED") // UNVALIDATED | VALIDATED | DEPRECATED | PROPOSED
+  source       String   @default("authored") // authored | discovered
+  evidence     String   @default("[]")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  applications RecipeApplication[]
+
+  @@unique([scope, key, version])
+}
+
+model RecipeApplication {
+  id        String   @id @default(cuid())
+  recipeId  String
+  recipe    EngineeringRecipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId String
+  buildId   String
+  itemKey   String
+  outcome   String   @default("PENDING") // PENDING | VERIFIED | FAILED | EXCLUDED (infra/cancel)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([recipeId, buildId])
+  @@index([companyId])
+}
+
+// Explicit user feedback and the concrete actions derived from it.
+model UserFeedback {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId    String?
+  itemKey      String?
+  buildId      String?
+  userId       String
+  text         String
+  kind         String   // intent_mismatch | responsive | scope | complexity | accessibility | quality | other
+  scope        String   // product | workspace
+  status       String   @default("ACTIVE") // ACTIVE | DISABLED
+  actions      String   @default("[]") // [{type, ref, detail}]
+  appliedCount Int      @default(0)
+  lastAppliedAt DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([companyId, productId, status])
 }

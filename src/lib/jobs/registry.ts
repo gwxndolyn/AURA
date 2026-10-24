@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { payloadOf } from "./queue";
 import { runBuild } from "@/lib/builder/engine";
 import { settle } from "@/lib/billing/entitlements";
+import { emit as emitLearning, processPending } from "@/lib/learning/service";
 import { runPlanning } from "@/lib/factory/planning";
 import { runExperiment as runLabExperiment } from "@/lib/lab/lab";
 import { advanceGoal, createGoal, type GoalKind, type GoalMode, type GoalLimits } from "@/lib/runtime/goals";
@@ -32,6 +33,8 @@ export const HANDLERS: Record<string, Handler> = {
     return onFinalFailure(job, () => runBuild(buildId, job.id), async (message) => {
       await prisma.build.updateMany({ where: { id: buildId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "BLOCKED", phase: "done", failure: `Stopped after ${job.attempts} attempt(s): ${message}`.slice(0, 2000), finishedAt: new Date() } });
       await settle(`build:${buildId}`, "concurrent_build", null);
+      const fb = await prisma.build.findUnique({ where: { id: buildId }, select: { companyId: true, productId: true, itemKey: true, status: true } });
+      if (fb) await emitLearning({ companyId: fb.companyId, type: "build.finished", key: `finished:${buildId}:${fb.status}`, productId: fb.productId, buildId, itemKey: fb.itemKey });
     });
   },
   // Lab experiments are long and deterministic; a failure leaves the experiment INTERRUPTED (re-runnable).
@@ -66,6 +69,8 @@ export const HANDLERS: Record<string, Handler> = {
     const { productId, request, actor } = payloadOf<{ productId: string; request: string; actor: string }>(job);
     return runChangeRequest(job.companyId, productId, request, actor);
   },
+  // Learning: process pending learning events (also run by the worker's maintenance tick).
+  "learning.process": async (job) => ({ processed: await processPending(200, [job.companyId]) }),
   // Self-test job used by health checks / acceptance tests: proves a worker is consuming the queue.
   "runtime.ping": async (job) => ({ pong: true, worker: job.workerId, at: new Date().toISOString() }),
   "product.plan": async (job) => {

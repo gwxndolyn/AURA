@@ -200,7 +200,14 @@ describe("acceptance scenario: baseline → candidate → compare → gate → p
       return;
     }
     expect(after!.status).toBe("APPROVED");
-    const promo = await promoteVersion({ companyId: wsA, candidateVersionId: cand.id, actor: userA });
+    // V11: simulated evidence alone can never promote a production prompt.
+    const sim = await promoteVersion({ companyId: wsA, candidateVersionId: cand.id, actor: userA });
+    expect(sim.promoted).toBe(false);
+    expect(sim.blockedReasons.join(" ")).toMatch(/simulated provider/);
+    expect((await getActiveVersion(wsA, key))!.id).toBe(v1!.id);
+    // The promotion/rollback mechanics themselves (explicit test-only override).
+    process.env.AURA_ALLOW_SIMULATED_PROMOTION = "1";
+    const promo = await promoteVersion({ companyId: wsA, candidateVersionId: cand.id, actor: userA }).finally(() => delete process.env.AURA_ALLOW_SIMULATED_PROMOTION);
     expect(promo.promoted).toBe(true);
     expect(promo.gates.passed).toBe(true);
     expect((await getActiveVersion(wsA, key))!.id).toBe(cand.id);

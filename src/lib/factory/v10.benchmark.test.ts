@@ -37,6 +37,8 @@ import { readAt } from "./git";
 import { upsertTarget, requestProductDeploy } from "@/lib/deploy/service";
 import { browserAvailable } from "@/lib/builder/browser";
 import { PROMPT_LIBRARY_VERSION } from "@/lib/agents/prompts";
+import { processPending } from "@/lib/learning/service";
+import { intelligenceOverview } from "@/lib/learning/workspace";
 import { startAnthropicDouble, type Double } from "../../../test/doubles/anthropic";
 import { expensesScripted, REQUEST, CHANGE_REQUEST } from "../../../test/doubles/expenses";
 
@@ -195,6 +197,23 @@ describe.skipIf(!ready)("V10 benchmark: responsive expense tracker through the r
     report.scorecard = Object.fromEntries(Object.entries(sc.metrics).map(([k, v]) => [k, v.value ?? `unavailable: ${v.unavailable}`]));
     report.modelDouble = model.stats;
     expect(gate.criteria.find((x) => x.id === "browser")!.status).toBe("passed");
+
+    // V11 learning, from the run's real records (processed in the background, here drained explicitly).
+    await processPending(500, [ws]);
+    const outcomes = await prisma.runOutcome.findMany({ where: { companyId: ws, productId } });
+    const t2 = outcomes.find((o) => o.itemKey === "E1.S1.T2")!;
+    expect(outcomes.map((o) => o.itemKey).sort()).toEqual(["C1.T1", "E1.S1.T1", "E1.S1.T2"]);
+    expect(t2).toMatchObject({ outcome: "VERIFIED", firstPassSuccess: false, attempts: 2, browserStatus: "passed" });
+    expect(t2.testsRun).toBeGreaterThan(0);
+    const attr = await prisma.failureAttribution.findMany({ where: { companyId: ws, itemKey: "E1.S1.T2" } });
+    // The browser-found defect (list not refreshed after save) is attributed with evidence, and the repair verified it.
+    expect(attr.map((a) => [a.category, a.scope, a.status, a.verification])).toContainEqual(["architecture_contract", "agent", "ESTABLISHED", "VERIFIED"]);
+    const fe = await prisma.build.findFirst({ where: { productId, itemKey: "E1.S1.T2" }, orderBy: { createdAt: "desc" } });
+    const manifest = JSON.parse(fe!.retrievalManifest) as { source: string; label: string }[];
+    expect(manifest.some((m) => m.source === "recipe" && m.label.startsWith("form-with-validation-states"))).toBe(true); // applicable recipe offered
+    expect(JSON.parse(fe!.taskMemory).approaches?.length).toBeGreaterThan(0); // resumable task memory
+    const ov = await intelligenceOverview(ws);
+    report.learning = { outcomes: outcomes.map((o) => `${o.itemKey}:${o.outcome}:${o.attempts}`), attributions: attr.map((a) => `${a.category}/${a.verification}`), retrieved: manifest.map((m) => `${m.source}:${m.label}`), summary: ov.summary, recipes: ov.recipes.map((r) => `${r.key}:${r.inThisWorkspace.verified}v`) };
     expect(sc.metrics.journeysPassed.value).toBeGreaterThan(0);
     expect(sc.metrics.repairSuccess.value).toBe(1);
     expect(sc.metrics.unsupportedClaims.value).toBe(0);
