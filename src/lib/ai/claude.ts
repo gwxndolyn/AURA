@@ -239,8 +239,22 @@ export interface ConverseResult {
   stopReason: "end_turn" | "max_turns" | "budget" | "cancelled";
 }
 
+/**
+ * Model candidates actually configured on this server (one provider today:
+ * Anthropic, via ANTHROPIC_API_KEY). `available` reflects configuration and
+ * AURA_MODEL_UNAVAILABLE (comma-separated model ids known to be down, set by
+ * operations during provider incidents). The router never invents providers.
+ */
+export function configuredModels() {
+  const down = new Set((process.env.AURA_MODEL_UNAVAILABLE ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  const key = hasApiKey();
+  return (Object.entries(MODELS) as [ModelTier, string][]).map(([tier, model]) => ({ provider: "anthropic", model, tier, available: key && !down.has(model), supportsTools: true, contextTokens: 200_000 }));
+}
+
 export async function converse(params: {
   tier: ModelTier;
+  /** Explicit model chosen by the router (must be configured on this server); defaults to the tier's model. */
+  model?: string;
   system: string;
   prompt: string;
   tools: ToolDef[];
@@ -252,7 +266,8 @@ export async function converse(params: {
   shouldStop?: (usage: { cost: number; turns: number }) => Promise<"budget" | "cancelled" | null>;
 }): Promise<ConverseResult> {
   if (!hasApiKey()) throw new ProviderError("not_configured", "No AI provider is configured (set ANTHROPIC_API_KEY on the server)", false);
-  const model = MODELS[params.tier];
+  if (params.model && !Object.values(MODELS).includes(params.model)) throw new ProviderError("bad_request", `Model ${params.model} is not configured on this server`, false);
+  const model = params.model ?? MODELS[params.tier];
   const start = Date.now();
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: params.prompt }];
   const out: ConverseResult = { text: "", model, tier: params.tier, turns: 0, toolCalls: 0, tokensIn: 0, tokensOut: 0, cost: 0, latencyMs: 0, stopReason: "end_turn" };

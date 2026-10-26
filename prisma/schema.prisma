@@ -1296,6 +1296,7 @@ model Product {
   scopeApprovedBy String?
   scopeApprovedAt DateTime?
   limits         String   @default("{}") // JSON {maxRepairs, maxParallel, budgetUsd, maxAttempts}
+  executionPolicy String  @default("{}") // V16 JSON {adaptivePolicy?, pinnedStrategy?, mandatoryChecks[], allowedProviders[], pinnedModels[], fallback}
   template       String?  // executable fixture app backing this product's code tasks (null = none)
   repoId         String?
   version        Int      @default(1)    // optimistic concurrency for edits
@@ -1565,6 +1566,10 @@ model Build {
   retrievalManifest String @default("[]")
   // V13: test selection for the attempt: {changed, selected[], reasons[], confidence, fullSuite, why}.
   testSelection String @default("{}")
+  // V16 adaptive execution (src/lib/builder/adaptive.ts): classification with evidence, chosen strategy + plan,
+  // verification requirements and status, tool + model decisions, and every strategy change with its rationale.
+  executionPlan String @default("{}")
+  adaptivePolicy String @default("")
   container   String?  // name of the sandbox container currently executing (cancellation kills it)
   correlationId String
   createdBy   String

@@ -342,3 +342,37 @@ export const ADAPTIVE_POLICIES: Record<string, AdaptivePolicy> = {
   "adaptive-v1": { id: "adaptive-v1", description: "Classification → least-complex sufficient strategy, risk-based verification, feedback controller with bounded adjustments.", adaptive: true, maxAdjustments: MAX_ADJUSTMENTS },
 };
 export const DEFAULT_ADAPTIVE_POLICY = "adaptive-v1";
+
+/**
+ * What actually executed in one attempt, mapped to the check vocabulary. Only
+ * executed evidence counts: a check with no matching evidence is "not_run",
+ * an unavailable tool is "unavailable" — neither is ever reported as passed.
+ */
+export function executedChecks(e: {
+  results: { id: string; ok: boolean }[];
+  browser: "passed" | "failed" | "unavailable" | null;
+  reviews: { source: "qa" | "security" | "review"; verdict: "approve" | "request_changes" | "missing" }[];
+  /** Contents of test files in the tree after the change. */
+  testFiles: string[];
+}): Partial<Record<CheckId, "passed" | "failed" | "unavailable">> {
+  const out: Partial<Record<CheckId, "passed" | "failed" | "unavailable">> = {};
+  const res = (id: string) => e.results.find((r) => r.id === id);
+  const test = res("test");
+  if (test) out.unit_tests = out.full_regression = test.ok ? "passed" : "failed";
+  for (const id of ["typecheck", "lint", "build"] as const) {
+    const r = res(id);
+    if (r) out[id] = r.ok ? "passed" : "failed";
+  }
+  // Integration evidence: the suite drives the real HTTP API; authorization evidence: tests assert 401/403.
+  if (test && e.testFiles.some((t) => /fetch\(|http\.request|supertest|\.listen\(/.test(t))) out.integration_tests = test.ok ? "passed" : "failed";
+  if (test && e.testFiles.some((t) => /\b(401|403)\b|forbidden|unauthori[sz]ed/i.test(t))) out.authorization_tests = test.ok ? "passed" : "failed";
+  if (e.browser) out.browser_journeys = e.browser;
+  const verdict = (s: "qa" | "security" | "review") => e.reviews.find((r) => r.source === s)?.verdict;
+  const rv = verdict("review");
+  if (rv && rv !== "missing") out.code_review = rv === "approve" ? "passed" : "failed";
+  const sv = verdict("security");
+  if (sv && sv !== "missing") out.security_review = sv === "approve" ? "passed" : "failed";
+  if (e.reviews.length && e.reviews.every((r) => r.verdict === "approve")) out.explicit_approval = "passed";
+  else if (e.reviews.some((r) => r.verdict === "request_changes")) out.explicit_approval = "failed";
+  return out;
+}
