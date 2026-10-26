@@ -6,6 +6,22 @@ was **actually run** to verify it, and what is missing. Last update: 2026-10-26 
 Status: **Verified** (tests run and passing) · **Implemented, unverified** ·
 **Partial** · **Blocked** (needs credentials/infrastructure) · **Not implemented**.
 
+## Product experience intelligence — AURA V17 (2026-10-26)
+
+Design: [architecture/product-experience.md](architecture/product-experience.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| Audit a running app: static + real Chromium (axe-core WCAG 2.x A/AA, keyboard, focus, touch targets, overflow, clipped text, headings, inert controls, broken links, form validation + server-error recovery probes, screenshots) | `experience/inspect.ts`, `builder/browser.ts` (`startIsolatedApp`) | Verified (real Docker + Chromium) | `inspect.test.ts`: planted defects found with evidence; corrected app clean | node-web stack only; no visual diffing | More stacks |
+| Journeys from the brief's requirements (load, create/persist, validation) with step evidence + requirement ids | `rubric.journeysFrom`, `inspect.runJourneys` | Verified | `inspect.test.ts`, `experience.test.ts` | Multi-page / auth flows not derived | Contract-driven journeys |
+| Findings: dimension, severity, confidence (confirmed/likely/hypothesis), impact, fix, evidence, files, requirements, manual-check flag; dedupe by fingerprint; FIXED only from evidence; REOPENED on the same row | `rubric.ts`, `service.persistFindings`, `ExperienceFinding` | Verified | `experience.test.ts` (dedupe; static-only never fixes; reopen) | — | — |
+| Metrics with formula + source; critical failures always visible; no browser ⇒ "not measured" | `rubric.scoreAudit` | Verified | `experience.test.ts` | No analytics/user research connected (stated) | — |
+| Closed loop: finding → backlog task (risk policy) → normal scheduler/builder → verified → re-audit → FIXED → memory; regression vs baseline; bounded attempts | `service.createTaskFromFinding`, `settleExperience`, scheduler hook | Verified (real Docker + Chromium; model double) | `experience.test.ts` closed-loop test | Fix verified on the task branch; re-audit audits the integration base (release) | — |
+| Risk policy: hypotheses never auto-tasked; sensitive / shared-component / navigation changes need an admin; critical cannot be dismissed | `rubric.remediationPolicy`, finding route | Verified | `experience.test.ts` API tests | Shared = imported by ≥3 files (static) | — |
+| API + isolation (VIEWER read, MEMBER audit/task, ADMIN dismiss/accept; cross-workspace 404) | `/products/[productId]/experience/*` | Verified | `experience.test.ts` | — | — |
+| Experience tab (persisted audits, journeys, metrics, findings with evidence, actions, limitations, screenshots) | `components/products/experience.tsx` | Verified in a browser (empty state) | `e2e/experience.spec.ts` | Populated state checked via API tests, not e2e | — |
+| AURA self-audit (axe + keyboard on its own key screens) and fixes | `e2e/experience.spec.ts`, `theme.ts`, `topbar.tsx` | Verified | e2e: found faint-text contrast 3.2–3.8:1 + unnamed breadcrumb link; fixed; re-run passes | Automated checks only; not a compliance claim | Extend to more screens |
+
 ## Adaptive execution — AURA V16 (2026-10-26)
 
 Design: [architecture/adaptive-execution.md](architecture/adaptive-execution.md).

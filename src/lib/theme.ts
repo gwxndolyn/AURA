@@ -24,7 +24,7 @@ export const palette = {
   text: {
     DEFAULT: "#ecebe6", // warm off-white
     muted: "#a3a29c",
-    faint: "#6e6d68",
+    faint: "#8f8e88", // ≥ 4.5:1 (WCAG AA) on every surface incl. bg.hover; was #6e6d68 (3.2–3.8:1, flagged by AURA's own experience audit)
   },
   // Accent. Named `brand` so existing utilities keep working.
   brand: {

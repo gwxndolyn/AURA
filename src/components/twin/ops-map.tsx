@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { palette } from "@/lib/theme";
 
 export interface DeptSummary {
   key: "product" | "engineering" | "qa" | "infra" | "security";
@@ -65,7 +66,7 @@ export function OpsMap({ departments, selected, onSelect }: { departments: DeptS
             >
               <rect x={L.x} y={L.y} width={L.w} height={L.h} rx={6} fill={sel ? "#18181b" : "#111113"} stroke={sel ? "#c5f04a" : t.stroke} strokeWidth={sel ? 1.5 : 1} />
               <text x={L.x + 12} y={L.y + 22} fill="#ecebe6" fontSize={13} fontWeight={600}>{d.label}</text>
-              <text x={L.x + 12} y={L.y + 40} fill="#6e6d68" fontSize={10} fontFamily="var(--font-mono)">{t.label}</text>
+              <text x={L.x + 12} y={L.y + 40} fill={palette.text.faint} fontSize={10} fontFamily="var(--font-mono)">{t.label}</text>
               {/* agent dots: lit when the agent's real status is THINKING/WORKING */}
               {d.agents.slice(0, 6).map((a, i) => (
                 <g key={a.key}>
@@ -77,7 +78,7 @@ export function OpsMap({ departments, selected, onSelect }: { departments: DeptS
               {k !== "security" && (
                 <g fontFamily="var(--font-mono)" fontSize={10}>
                   <text x={L.x + 12} y={L.y + 96} fill="#a3a29c">{`${d.signals.running} running · ${d.signals.queued} queued`}</text>
-                  <text x={L.x + 12} y={L.y + 110} fill={d.signals.blocked ? "#e5a13b" : "#6e6d68"}>{`${d.signals.blocked} blocked · ${d.signals.recentFailures} failed (7d)`}</text>
+                  <text x={L.x + 12} y={L.y + 110} fill={d.signals.blocked ? palette.warning : palette.text.faint}>{`${d.signals.blocked} blocked · ${d.signals.recentFailures} failed (7d)`}</text>
                 </g>
               )}
               {k === "security" && <text x={L.x + 160} y={L.y + 62} fill="#a3a29c" fontSize={10} fontFamily="var(--font-mono)">{`${d.signals.running} running · ${d.signals.blocked} blocked · ${d.signals.recentFailures} failed (7d)`}</text>}

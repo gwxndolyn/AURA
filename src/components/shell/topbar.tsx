@@ -59,7 +59,7 @@ export function Topbar({
       </button>
 
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
-        <Link href={`/app/${companyId}`} className={`truncate text-text-muted hover:text-text ${section && section.href !== "" ? "hidden sm:inline" : ""}`}>
+        <Link href={`/app/${companyId}`} aria-label={companyName === "…" ? "Workspace home" : undefined} className={`truncate text-text-muted hover:text-text ${section && section.href !== "" ? "hidden sm:inline" : ""}`}>
           {companyName === "…" ? <span className="skeleton inline-block h-3 w-20 align-middle" /> : companyName}
         </Link>
         <span className="hidden sm:inline">

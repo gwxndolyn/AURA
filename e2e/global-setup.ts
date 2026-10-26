@@ -11,7 +11,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
  */
 export const STORAGE_STATE = "e2e/.auth/state.json";
 export const USERS_FILE = "e2e/.auth/users.json";
-export const POOL = ["collab", "ops", "other", "factory", "v3", "autopilot", "learning"] as const;
+export const POOL = ["collab", "ops", "other", "factory", "v3", "autopilot", "learning", "experience"] as const;
 export const PASSWORD = "e2e-password-123";
 
 export default async function globalSetup(config: FullConfig) {
