@@ -30,6 +30,7 @@ import { loadProduct, limitsOf, setItemStatus, appendItemHistory, movePhase, pro
 import { missingInputs } from "@/lib/builder/orchestrator";
 import { syncFeatureContracts } from "./contract";
 import { settleProposals } from "./maintenance";
+import { settleExperience } from "@/lib/experience/service";
 import { produceDesign, produceArchitecture } from "./artifacts";
 
 const LEASE_MS = 60_000;
@@ -233,6 +234,8 @@ export async function tickProduct(companyId: string, productId: string, opts: { 
 
     // Maintenance proposals follow their tasks' verified outcomes.
     await settleProposals(companyId, productId).catch(() => null);
+    // Experience findings follow their tasks; a verified UX fix triggers a re-audit (the finding is FIXED only if no longer observed).
+    await settleExperience(companyId, productId).catch(() => null);
     // Feature contracts: one shared definition per story; a changed definition flags already-verified tasks.
     const contractChanges = await syncFeatureContracts(companyId, productId).catch(() => []);
     for (const c of contractChanges) if (c.affected.length) await productEvent(companyId, productId, `Feature contract ${c.story} changed (v${c.version}); verified work to re-check: ${c.affected.join(", ")}`, { level: "warning", actor: "product-manager" });

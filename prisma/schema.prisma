@@ -192,6 +192,8 @@ model Company {
   investigations  Investigation[]
   proposals       ImprovementProposal[]
   maintenanceRuns MaintenanceCycle[]
+  experienceAudits   ExperienceAudit[]
+  experienceFindings ExperienceFinding[]
 
   @@index([ownerId])
 }
@@ -2409,4 +2411,73 @@ model MaintenanceCycle {
   finishedAt  DateTime?
 
   @@index([companyId, productId, createdAt])
+}
+
+// V17 — product experience intelligence. One audit = one inspection of a
+// product revision (static + real browser when available). Findings are
+// deduplicated by fingerprint across audits so history (fixed, reopened)
+// lives on ONE row. Everything is observed; nothing is invented.
+model ExperienceAudit {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  sha         String    @default("")
+  branch      String    @default("")
+  trigger     String    @default("manual") // manual | build | change
+  status      String    @default("QUEUED") // QUEUED | RUNNING | COMPLETED | FAILED | CANCELLED
+  jobId       String?
+  methods     String    @default("{}") // {static, browser, axe, journeys}: "ran" | "unavailable: reason"
+  routes      String    @default("[]") // [{route, viewport, httpStatus, screenshot}]
+  journeys    String    @default("[]") // [{id, name, requirements, status, steps:[{action, expect, observed, ok}], detail}]
+  score       String    @default("{}") // {metrics:[{id, label, value, of, source}], criticalFailures, verdict}
+  limitations String    @default("[]")
+  baselineId  String?   // previous completed audit compared against
+  regressions String    @default("[]") // fingerprints failing now that the baseline did not show
+  error       String    @default("")
+  createdBy   String    @default("")
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([companyId, productId, createdAt])
+}
+
+model ExperienceFinding {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId      String
+  fingerprint    String    // dimension + rule + route + target (stable across audits)
+  dimension      String    // task_completion | clarity | interaction | accessibility | responsive | consistency | feedback
+  rule           String    // e.g. axe:color-contrast, form:no-validation-feedback, journey:create-persists
+  title          String
+  detail         String    @default("")
+  route          String    @default("")
+  viewport       String    @default("")
+  target         String    @default("") // selector / component / file
+  files          String    @default("[]")
+  requirements   String    @default("[]")
+  journey        String    @default("")
+  severity       String    // critical | high | medium | low
+  confidence     String    // confirmed | likely | hypothesis
+  method         String    // browser | axe | static | journey
+  impact         String    @default("")
+  recommendation String    @default("")
+  evidence       String    @default("[]") // [{kind, ref, detail}]
+  manualCheck    Boolean   @default(false) // also needs manual assistive-technology / human verification
+  status         String    @default("OPEN") // OPEN | IN_PROGRESS | FIXED | REOPENED | ACCEPTED_RISK | DISMISSED
+  firstAuditId   String
+  lastAuditId    String
+  lastSeenAt     DateTime  @default(now())
+  fixedAt        DateTime?
+  fixedByAuditId String?
+  reopened       Int       @default(0)
+  itemKey        String?   // backlog task created from this finding
+  attempts       Int       @default(0)
+  history        String    @default("[]")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([productId, fingerprint])
+  @@index([companyId, productId, status])
 }

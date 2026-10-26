@@ -95,6 +95,59 @@ export function collectionRoutes(routes: { method: string; path: string }[]) {
 
 const RELAY = `const net=require("net");net.createServer(c=>{const u=net.connect(3000,"app");c.pipe(u).pipe(c);u.on("error",()=>c.destroy());c.on("error",()=>u.destroy())}).listen(8080)`;
 
+export type RunningApp = { base: string; stop: () => Promise<void> };
+
+/**
+ * Run an untrusted app tree in the isolated container + relay described above
+ * and wait until it answers. Returns `{ app }` or `{ unavailable }` (infra
+ * missing) or `{ failed, log }` (the app itself did not start). Shared by
+ * build verification and the experience audit (src/lib/experience).
+ */
+export async function startIsolatedApp(args: { treeDir: string; id: string; startTimeoutMs?: number }): Promise<{ app: RunningApp } | { unavailable: string } | { failed: string; log: string; stop: () => Promise<void> }> {
+  const id = `${args.id.slice(-10).toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(3).toString("hex")}`;
+  const net = `aura-bnet-${id}`;
+  const app = `aura-bapp-${id}`;
+  const relay = `aura-brel-${id}`;
+  const port = 24000 + Math.floor(Math.random() * 8000);
+  const lock = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=128", "-u", "node"];
+  const stop = async () => {
+    await docker(["rm", "-f", app, relay], 20_000);
+    await docker(["network", "rm", net], 20_000);
+  };
+  const n = await docker(["network", "create", "--internal", net]);
+  if (!n.ok) return { unavailable: `Could not create an isolated network: ${n.out}` };
+  // No --rm: a crashed app's log must remain readable for the diagnosis (removed in stop()).
+  const a = await docker(["run", "-d", "--name", app, "--network", net, "--network-alias", "app", ...lock, "--memory=256m", "--cpus=1", "--tmpfs", "/tmp:rw,size=64m", "-e", "PORT=3000", "-e", "DATA_DIR=/tmp/data", "-e", "NODE_ENV=production", "-v", `${args.treeDir}:/work:ro`, "-w", "/work", IMAGE, "node", "src/server.js"]);
+  if (!a.ok) { await stop(); return { unavailable: `The app container did not start: ${a.out}` }; }
+  const r = await docker(["run", "-d", "--rm", "--name", relay, ...lock, "--memory=64m", "-p", `127.0.0.1:${port}:8080`, IMAGE, "node", "-e", RELAY]);
+  if (!r.ok) { await stop(); return { unavailable: `The relay did not start: ${r.out}` }; }
+  await docker(["network", "connect", net, relay]);
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + (args.startTimeoutMs ?? 20_000);
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${base}/`, { signal: AbortSignal.timeout(2000) });
+      if (res.status < 500) return { app: { base, stop } };
+    } catch {
+      /* not ready */
+    }
+    await new Promise((x) => setTimeout(x, 400));
+  }
+  const logs = await docker(["logs", "--tail", "40", app]);
+  return { failed: `The app did not start serving within ${Math.round((args.startTimeoutMs ?? 20_000) / 1000)} s.`, log: logs.out.slice(-1500), stop };
+}
+
+/** Real Chromium (Playwright), or null with the reason. */
+export async function launchChromium(): Promise<{ browser: { close: () => Promise<void>; newContext: (o: object) => Promise<any> } } | { unavailable: string }> {
+  const chromium = await loadChromium();
+  if (!chromium) return { unavailable: "Browser automation (playwright-core + Chromium) is not installed on this server" };
+  try {
+    return { browser: await chromium.launch({ headless: true }) };
+  } catch (e) {
+    return { unavailable: `Chromium could not be launched: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export async function verifyInBrowser(args: { treeDir: string; buildId: string; files: string[]; apiRoutes: { method: string; path: string }[]; evidenceDir: string; startTimeoutMs?: number }): Promise<BrowserResult> {
   const t0 = Date.now();
   const empty = (status: BrowserResult["status"], reason: string): BrowserResult => ({ status, reason, routes: [], findings: [], journeys: [], durationMs: Date.now() - t0 });
@@ -102,46 +155,21 @@ export async function verifyInBrowser(args: { treeDir: string; buildId: string; 
   if (!chromium) return empty("unavailable", "Browser automation (playwright-core + Chromium) is not installed on this server");
   if (!args.files.includes("src/server.js") && !args.files.includes("package.json")) return empty("unavailable", "No runnable web entry point detected (expected package.json start script)");
 
-  const id = `${args.buildId.slice(-10).toLowerCase()}-${randomBytes(3).toString("hex")}`;
-  const net = `aura-bnet-${id}`;
-  const app = `aura-bapp-${id}`;
-  const relay = `aura-brel-${id}`;
-  const port = 24000 + Math.floor(Math.random() * 8000);
-  const lock = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=128", "-u", "node"];
   const findings: BrowserFinding[] = [];
   const routesOut: BrowserResult["routes"] = [];
   const journeys: BrowserResult["journeys"] = [];
   let browser: { close: () => Promise<void>; newContext: (o: object) => Promise<any> } | null = null;
+  let stopApp: (() => Promise<void>) | null = null;
   try {
-    const n = await docker(["network", "create", "--internal", net]);
-    if (!n.ok) return empty("unavailable", `Could not create an isolated network: ${n.out}`);
-    // No --rm: a crashed app's log must remain readable for the diagnosis (removed in finally).
-    const a = await docker(["run", "-d", "--name", app, "--network", net, "--network-alias", "app", ...lock, "--memory=256m", "--cpus=1", "--tmpfs", "/tmp:rw,size=64m", "-e", "PORT=3000", "-e", "DATA_DIR=/tmp/data", "-e", "NODE_ENV=production", "-v", `${args.treeDir}:/work:ro`, "-w", "/work", IMAGE, "node", "src/server.js"]);
-    if (!a.ok) return empty("unavailable", `The app container did not start: ${a.out}`);
-    const r = await docker(["run", "-d", "--rm", "--name", relay, ...lock, "--memory=64m", "-p", `127.0.0.1:${port}:8080`, IMAGE, "node", "-e", RELAY]);
-    if (!r.ok) return empty("unavailable", `The relay did not start: ${r.out}`);
-    await docker(["network", "connect", net, relay]);
-    const base = `http://127.0.0.1:${port}`;
-    // Wait for the real app to answer.
-    const deadline = Date.now() + (args.startTimeoutMs ?? 20_000);
-    let up = false;
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`${base}/`, { signal: AbortSignal.timeout(2000) });
-        if (res.status < 500) {
-          up = true;
-          break;
-        }
-      } catch {
-        /* not ready */
-      }
-      await new Promise((x) => setTimeout(x, 400));
-    }
-    if (!up) {
-      const logs = await docker(["logs", "--tail", "40", app]);
-      findings.push({ kind: "load_failed", route: "/", viewport: "-", detail: `The app did not start serving within ${Math.round((args.startTimeoutMs ?? 20_000) / 1000)} s. Container log:\n${logs.out.slice(-1500)}`, severity: "high", blocking: true });
+    const started = await startIsolatedApp({ treeDir: args.treeDir, id: args.buildId, startTimeoutMs: args.startTimeoutMs });
+    if ("unavailable" in started) return empty("unavailable", started.unavailable);
+    if ("failed" in started) {
+      stopApp = started.stop;
+      findings.push({ kind: "load_failed", route: "/", viewport: "-", detail: `${started.failed} Container log:\n${started.log}`, severity: "high", blocking: true });
       return { status: "failed", routes: [], findings, journeys: [{ name: "app starts", status: "failed", detail: "no HTTP response" }], durationMs: Date.now() - t0 };
     }
+    stopApp = started.app.stop;
+    const base = started.app.base;
 
     browser = await chromium.launch({ headless: true });
     await mkdir(args.evidenceDir, { recursive: true });
@@ -259,8 +287,7 @@ export async function verifyInBrowser(args: { treeDir: string; buildId: string; 
     return { ...empty("unavailable", `Browser verification could not run: ${(e as Error).message.slice(0, 300)}`), routes: routesOut, findings };
   } finally {
     await browser?.close().catch(() => null);
-    await docker(["rm", "-f", app, relay], 20_000);
-    await docker(["network", "rm", net], 20_000);
+    await stopApp?.();
   }
 }
 

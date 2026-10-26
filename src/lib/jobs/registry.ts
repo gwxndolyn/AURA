@@ -12,6 +12,7 @@ import { advanceGoal, createGoal, type GoalKind, type GoalMode, type GoalLimits 
 import { runImprovementCycle } from "@/lib/runtime/improve";
 import { runDeployment } from "@/lib/deploy/service";
 import { runChangeRequest } from "@/lib/factory/change";
+import { runAudit as runExperienceAudit } from "@/lib/experience/service";
 
 /** Execution context: `signal` aborts on cancel / timeout / shutdown — long handlers must stop at their next checkpoint. */
 export interface JobContext { signal: AbortSignal; workerId: string }
@@ -74,6 +75,13 @@ export const HANDLERS: Record<string, Handler> = {
   "maintenance.cycle": async (job) => {
     const { productId, actor, cycleId } = payloadOf<{ productId: string; actor: string; cycleId?: string }>(job);
     return runMaintenanceCycle(job.companyId, productId, actor, { cycleId });
+  },
+  // Product experience audit (V17): static + real-browser inspection of the product's integration base; bounded, cancellable.
+  "experience.audit": async (job, ctx) => {
+    const { auditId } = payloadOf<{ auditId: string }>(job);
+    return onFinalFailure(job, () => runExperienceAudit(auditId, ctx.signal), async (message) => {
+      await prisma.experienceAudit.updateMany({ where: { id: auditId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", error: `Stopped after ${job.attempts} attempt(s): ${message}`.slice(0, 1000), finishedAt: new Date() } });
+    });
   },
   // Learning: process pending learning events (also run by the worker's maintenance tick).
   "learning.process": async (job) => ({ processed: await processPending(200, [job.companyId]) }),
