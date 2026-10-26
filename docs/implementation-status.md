@@ -1,10 +1,28 @@
 # Implementation status ledger
 
 The recovery point for continuing work. Each row says where the code is, what
-was **actually run** to verify it, and what is missing. Last update: 2026-10-24 (V8 commercial SaaS, V9 agent team, V10 product craft, V11 learning, V13 integration, V14 evolution).
+was **actually run** to verify it, and what is missing. Last update: 2026-10-26 (V16 adaptive execution; earlier: V8–V11, V13, V14).
 
 Status: **Verified** (tests run and passing) · **Implemented, unverified** ·
 **Partial** · **Blocked** (needs credentials/infrastructure) · **Not implemented**.
+
+## Adaptive execution — AURA V16 (2026-10-26)
+
+Design: [architecture/adaptive-execution.md](architecture/adaptive-execution.md).
+
+| Requirement | Location | Status | Verification performed | Limitations | Next action |
+|---|---|---|---|---|---|
+| Task classification with evidence, confidence, fast path, blocking ambiguity | `builder/adaptive.ts` `classifyTask`, `planner.ts` | Verified | `adaptive.test.ts`; benchmark (ambiguous task BLOCKED before any model call) | Rule-based heuristics | Learn thresholds from RunOutcome |
+| Capability-based owner + limitations recorded | `planExecution` (capability registry) | Verified | benchmark plans record owner + why | Owner still comes from the backlog item's capability | — |
+| Dynamic strategy (7 strategies), least-complex sufficient, pin by policy, persisted plan with steps/checkpoints | `chooseStrategy`, `Build.executionPlan` | Verified | `adaptive.test.ts`; benchmark (≥3 distinct strategies; baseline uses one) | `collaborative` is a planning decision; execution is single-owner per run | Sub-run fan-out |
+| Risk-based verification depth + mandatory policy checks; missing evidence = unverified | `verificationRequirements`, `executedChecks`, `verificationStatus`, engine policy findings | Verified | `adaptive.test.ts`; benchmark (authorization_tests passed on the auth task) | Integration/authorization evidence detected from test source patterns | — |
+| Adaptive tool selection (reports unavailable/unpermitted) | `toolPlan` | Verified | `adaptive.test.ts` | `docs.research` tool not available | — |
+| Evidence-based model routing: pins, allowed providers, same-or-stronger fallback, blockers; explicit model on `converse` | `routeModel`, `configuredModels`, engine `routedModel` | Verified | `adaptive.test.ts`, `execution.api.test.ts` (configured models + AURA_MODEL_UNAVAILABLE) | One provider configured | Second provider adapter |
+| Feedback controller: bounded adjustments, oscillation stop, recorded rationale | `adjust`, engine `applyDecision`, `recordAdjustment` | Verified | `adaptive.test.ts`; benchmark (unsolvable task: investigate → stop); `engine.double.test.ts` | — | — |
+| Versioned policies + rollback (`baseline`, `adaptive-v1`), per-project or `AURA_ADAPTIVE_POLICY` | `ADAPTIVE_POLICIES`, `setExecutionPolicy` | Verified | `execution.api.test.ts` (set, roll back, audit, 422, 404) | Promotion is manual | — |
+| Strategy measurement vs baseline | `strategyMetrics`, `adaptive.benchmark.test.ts` | Verified (model double) | 8-task benchmark: first-attempt 6 vs 4, attempts 9 vs 12, model calls 44 vs 55 | Scripted model, not live quality; docker CLI double without Docker | Re-run with Docker + live model |
+| Execution workspace UI | `components/products/execution.tsx`, Execution tab | Implemented, unverified in a browser | typecheck + lint only | No e2e for this tab | Add Playwright check |
+| V15 portfolio coordinator integration | — | **Not implemented** (V15 does not exist in this repository) | — | Product scheduler + job queue remain the coordination authority | Implement V15 first |
 
 ## Integration intelligence + product evolution — AURA V13/V14 (2026-10-24)
 
