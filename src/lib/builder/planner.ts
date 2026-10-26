@@ -7,15 +7,17 @@
  * the same record by `recordAdjustment` — the workspace shows exactly what was
  * decided, when and why.
  */
+import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { parseJSON } from "@/lib/utils";
+import { ApiError } from "@/lib/api";
 import { configuredModels } from "@/lib/ai/claude";
 import { permissionsFor } from "@/lib/agents/permissions";
 import { capabilityFor } from "@/lib/agents/capabilities";
 import { dependentsOf, type CodeIndexData } from "./intel";
 import {
   classifyTask, chooseStrategy, verificationRequirements, verificationStatus, toolPlan, routeModel, collaborationValue,
-  ADAPTIVE_POLICIES, DEFAULT_ADAPTIVE_POLICY, DEFAULT_MODEL_POLICY,
+  ADAPTIVE_POLICIES, DEFAULT_ADAPTIVE_POLICY, DEFAULT_MODEL_POLICY, STRATEGIES, CHECKS,
   type Classification, type StrategyDecision, type CheckId, type ModelPolicy, type Strategy, type AdjustDecision,
 } from "./adaptive";
 import type { Risk } from "./orchestrator";
@@ -112,6 +114,74 @@ export async function recordAdjustment(buildId: string, attempt: number, d: Adju
   if (!rec.strategy) return;
   rec.adjustments = [...(rec.adjustments ?? []), { ...d, attempt, at: new Date().toISOString(), applied }];
   await prisma.build.update({ where: { id: buildId }, data: { executionPlan: JSON.stringify(rec) } });
+}
+
+export const ExecutionPolicySchema = z.object({
+  adaptivePolicy: z.string().refine((s) => s === "" || !!ADAPTIVE_POLICIES[s], "unknown adaptive policy").optional(),
+  pinnedStrategy: z.enum(STRATEGIES).nullable().optional(),
+  mandatoryChecks: z.array(z.enum(CHECKS)).max(CHECKS.length).optional(),
+  allowedProviders: z.array(z.string().trim().min(1).max(40)).max(10).optional(),
+  pinnedModels: z.array(z.string().trim().min(1).max(120)).max(10).optional(),
+  fallback: z.enum(["fallback", "fail"]).optional(),
+}).strict();
+
+/** The product's execution policy plus what is available to choose from. Caller must have checked workspace access. */
+export async function getExecutionPolicy(companyId: string, productId: string) {
+  const p = await prisma.product.findFirst({ where: { id: productId, companyId }, select: { executionPolicy: true } });
+  if (!p) throw new ApiError("Product not found", 404);
+  const policy = parseJSON<ExecutionPolicy>(p.executionPolicy, {});
+  const effective = policy.adaptivePolicy && ADAPTIVE_POLICIES[policy.adaptivePolicy] ? policy.adaptivePolicy : process.env.AURA_ADAPTIVE_POLICY && ADAPTIVE_POLICIES[process.env.AURA_ADAPTIVE_POLICY] ? process.env.AURA_ADAPTIVE_POLICY : DEFAULT_ADAPTIVE_POLICY;
+  return {
+    policy, effective, policies: Object.values(ADAPTIVE_POLICIES), strategies: STRATEGIES, checks: CHECKS,
+    models: configuredModels().map((m) => ({ provider: m.provider, model: m.model, tier: m.tier, available: m.available })),
+  };
+}
+
+/** Change (or roll back) the execution policy. Applies to runs that START after the change; running plans keep theirs. */
+export async function setExecutionPolicy(companyId: string, productId: string, input: z.infer<typeof ExecutionPolicySchema>) {
+  const p = await prisma.product.findFirst({ where: { id: productId, companyId }, select: { executionPolicy: true } });
+  if (!p) throw new ApiError("Product not found", 404);
+  const next: ExecutionPolicy = { ...parseJSON<ExecutionPolicy>(p.executionPolicy, {}) };
+  for (const [k, v] of Object.entries(input) as [keyof ExecutionPolicy, unknown][]) {
+    if (v === null || v === "" || (Array.isArray(v) && !v.length)) delete next[k];
+    else (next as Record<string, unknown>)[k] = v;
+  }
+  await prisma.product.update({ where: { id: productId }, data: { executionPolicy: JSON.stringify(next) } });
+  return next;
+}
+
+/**
+ * Strategy measurement from persisted runs: per policy and per strategy —
+ * runs, verified, first-attempt verification, attempts, cost, strategy changes.
+ * Only finished runs with a recorded plan count.
+ */
+export async function strategyMetrics(companyId: string, productId?: string) {
+  const builds = await prisma.build.findMany({
+    where: { companyId, ...(productId ? { productId } : {}), status: { in: ["VERIFIED", "FAILED", "BLOCKED"] }, adaptivePolicy: { not: "" } },
+    select: { status: true, attempt: true, costUsd: true, modelCalls: true, adaptivePolicy: true, executionPlan: true, stopReason: true, failure: true },
+    take: 2000, orderBy: { createdAt: "desc" },
+  });
+  type Row = { runs: number; verified: number; firstAttempt: number; blocked: number; attempts: number; costUsd: number; modelCalls: number; adjustments: number };
+  const blank = (): Row => ({ runs: 0, verified: 0, firstAttempt: 0, blocked: 0, attempts: 0, costUsd: 0, modelCalls: 0, adjustments: 0 });
+  const byPolicy: Record<string, Row> = {};
+  const byStrategy: Record<string, Row & { policy: string }> = {};
+  for (const b of builds) {
+    const plan = parseJSON<Partial<ExecutionPlanRecord>>(b.executionPlan, {});
+    const strategy = plan.strategy?.strategy ?? "unknown";
+    const add = (r: Row) => {
+      r.runs++;
+      if (b.status === "VERIFIED") r.verified++;
+      if (b.status === "VERIFIED" && b.attempt === 0) r.firstAttempt++;
+      if (b.status === "BLOCKED") r.blocked++;
+      r.attempts += b.status === "BLOCKED" && !b.modelCalls ? 0 : b.attempt + 1;
+      r.costUsd += b.costUsd;
+      r.modelCalls += b.modelCalls;
+      r.adjustments += plan.adjustments?.length ?? 0;
+    };
+    add((byPolicy[b.adaptivePolicy] ??= blank()));
+    add((byStrategy[`${b.adaptivePolicy}:${strategy}`] ??= { ...blank(), policy: b.adaptivePolicy }));
+  }
+  return { byPolicy, byStrategy };
 }
 
 /** Required-vs-executed checks for the latest attempt (missing evidence stays "not_run"/"unavailable"). */

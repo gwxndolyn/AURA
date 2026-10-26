@@ -124,7 +124,7 @@ export function classifyTask(t: TaskEvidence): Classification {
     ...(t.acceptance.length === 0 ? ["What observable result makes this task done? (no acceptance criteria)"] : []),
     ...(vague ? [`"${t.title}" has no measurable target — what should change, by how much, and where?`] : []),
   ];
-  const uncertainty: Dimension<"low" | "medium" | "high"> = questions.length ? { value: "high", evidence: questions } : familiarity.value !== "known" || category.value === "debugging" && !t.files.length || failRate !== null && failRate > 0.5 ? { value: "medium", evidence: ev(familiarity.value !== "known" && "planned files not all known", category.value === "debugging" && !t.files.length && "defect location unknown", failRate !== null && failRate > 0.5 && `first-pass failure rate ${Math.round(failRate * 100)}% on ${t.history.length} comparable task(s)`) } : { value: "low", evidence: ["criteria and files are concrete"] };
+  const uncertainty: Dimension<"low" | "medium" | "high"> = questions.length ? { value: "high", evidence: questions } : !t.files.length || failRate !== null && failRate > 0.5 ? { value: "medium", evidence: ev(!t.files.length && category.value !== "debugging" && "no planned files: the right place must be found", category.value === "debugging" && !t.files.length && "defect location unknown", failRate !== null && failRate > 0.5 && `first-pass failure rate ${Math.round(failRate * 100)}% on ${t.history.length} comparable task(s)`) } : { value: "low", evidence: ["criteria and files are concrete"] };
   decided++;
 
   const research: Dimension<boolean> = { value: t.externalApis.length > 0 && familiarity.value !== "known", evidence: t.externalApis.length ? [`external API(s) ${t.externalApis.join(", ")}${familiarity.value === "known" ? " already used in the repository" : " not yet used in the repository"}`] : ["no external API"] };
@@ -297,6 +297,7 @@ export function adjust(s: Signals): AdjustDecision {
   // Oscillation: the same adjustment twice in a row, or too many adjustments → stop and surface.
   const last2 = adjustments.slice(-2);
   if (adjustments.length >= MAX_ADJUSTMENTS) return { action: "stop", blocker: "adjustment budget used", rationale: `${adjustments.length} strategy changes (${adjustments.join(" → ")}) did not produce a passing attempt`, source: "plan" };
+  if (s.identicalTree && adjustments[adjustments.length - 1] === "investigate") return { action: "stop", blocker: "repair changed nothing", rationale: "the code is unchanged even after an investigation step; more attempts would repeat it — needs a person", source: "implementation" };
   if (s.identicalTree) return pick("investigate", "repair changed nothing", "the last repair did not change the code; gather new evidence (re-read failing tests and code) before another attempt", "implementation");
   if (s.revertedFiles.length) return pick("narrow_scope", `files changed then reverted: ${s.revertedFiles.slice(0, 3).join(", ")}`, "the agent is oscillating on the same files; narrow to the failing criterion and the planned files", "plan");
   if (s.scopeGrowth > 3) return pick("narrow_scope", `scope grew ${s.scopeGrowth.toFixed(1)}× the planned files`, "changes spread far beyond the plan; restrict to planned files + their tests", "plan");

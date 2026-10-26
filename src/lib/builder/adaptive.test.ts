@@ -109,7 +109,8 @@ describe("feedback controller", () => {
     expect(adjust(sig).action).toBe("continue");
   });
   it("stops on oscillation, repeated escalation, exhausted adjustments or budget", () => {
-    expect(adjust({ ...sig, identicalTree: true, adjustmentsSoFar: ["investigate", "investigate"] }).action).toBe("stop");
+    expect(adjust({ ...sig, identicalTree: true, adjustmentsSoFar: ["investigate"] }).rationale).toMatch(/unchanged even after an investigation/);
+    expect(adjust({ ...sig, unprovenCriteria: 1, adjustmentsSoFar: ["investigate", "investigate"] }).action).toBe("stop");
     expect(adjust({ ...sig, recurringDefect: true, adjustmentsSoFar: ["add_reproduction", "escalate_model"] }).action).toBe("stop");
     expect(adjust({ ...sig, adjustmentsSoFar: ["investigate", "narrow_scope", "add_reviewer"] }).rationale).toMatch(/3 strategy changes/);
     expect(adjust({ ...sig, budgetLeftUsd: 0 }).source).toBe("budget");

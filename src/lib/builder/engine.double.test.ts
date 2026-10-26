@@ -141,7 +141,8 @@ describe.skipIf(realDocker)("engineering run with the docker CLI test double (ho
     await drainUntil(settled(r.product.id));
     const b = (await prisma.build.findFirst({ where: { productId: r.product.id } }))!;
     expect(b.status).toBe("FAILED");
-    expect(b.stopReason).toBe("repeated_failure");
+    // Baseline stops on the unchanged tree; adaptive-v1 (default) first investigates once, then stops with the controller's reason.
+    expect(["repeated_failure", "strategy_exhausted"]).toContain(b.stopReason);
     expect(b.attempt).toBeLessThan(4); // stopped before exhausting 5 attempts
     expect((await prisma.defect.findFirst({ where: { buildId: b.id } }))!.status).toBe("ABANDONED");
     await tickProduct(ws, r.product.id);

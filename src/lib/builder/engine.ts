@@ -52,7 +52,7 @@ import { snapshotGraph, selectTests, investigate, settleInvestigations, diagnosi
 import { emit as emitLearning } from "@/lib/learning/service";
 import { assessRisk, reviewPlan, handoffFor, recoveryFor, resolveDisagreement, contextPackage, type ReviewPlan, type ReviewOutcome } from "./orchestrator";
 import { planExecution, recordAdjustment, recordVerification, strategyObjective, type ExecutionPlanRecord } from "./planner";
-import { adjust, executedChecks, verificationStatus, ADAPTIVE_POLICIES, type Adjustment } from "./adaptive";
+import { adjust, executedChecks, verificationStatus, ADAPTIVE_POLICIES, type Adjustment, type AdjustDecision } from "./adaptive";
 
 type BuildRow = NonNullable<Awaited<ReturnType<typeof prisma.build.findFirst>>>;
 export interface Finding { source: "qa" | "security" | "review" | "verification" | "impact" | "browser"; severity: "low" | "medium" | "high" | "critical"; title: string; detail: string; evidence: string; blocking: boolean }
@@ -430,7 +430,23 @@ async function runBuildInner(buildId: string, jobId: string | null) {
     let stopped: { reason: string; detail: string } | null = null;
     let adjustNote = "";
     let prevChanged: string[] = [];
-    let prevSig = "";
+    /** Apply one feedback-controller decision: change the next attempt's strategy (recorded with its rationale) or stop. */
+    const applyDecision = async (decision: AdjustDecision, attempt: number) => {
+      let applied = "none";
+      adjustNote = "";
+      if (decision.action === "stop") {
+        applied = "stopped the run";
+        stopped = { reason: "strategy_exhausted", detail: `${decision.blocker}: ${decision.rationale}` };
+      } else if (decision.action === "escalate_model") { escalate = true; applied = "next attempt on the REASONING tier"; }
+      else if (decision.action === "investigate") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. Before editing, read the failing tests and the code they exercise and state the root cause.`; applied = "investigation step before the next edit"; }
+      else if (decision.action === "add_reproduction") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. First write a minimal test that reproduces the remaining failure and show it failing; then fix the code.`; applied = "reproduce-first repair"; }
+      else if (decision.action === "narrow_scope") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. Only change: ${scope.join(", ") || "the files named by the failing tests"} and their tests; revert unrelated edits.`; applied = "narrowed scope"; }
+      else if (decision.action === "add_reviewer") { applied = "independent reviewer verdicts decide (evidence over opinion)"; }
+      if (decision.action === "continue") return;
+      adjustments.push(decision.action);
+      await recordAdjustment(b.id, attempt, decision, applied);
+      await event(b, `Strategy change for ${b.itemKey}: ${decision.action.replace(/_/g, " ")} — ${decision.rationale}`, decision.action === "stop" ? "danger" : "warning", owner);
+    };
     for (let attempt = b.attempt; attempt <= b.maxRepairs; attempt++) {
       await checkpoint(b, jobId);
       await update(b, { attempt, phase: attempt === 0 ? "implement" : "repair" });
@@ -478,7 +494,11 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       }
       const th = await treeHash(tree);
       if (lastTree && th === lastTree) {
-        stopped = { reason: "repeated_failure", detail: "The repair attempt left the code exactly as it was after the previous failed attempt; retrying again would repeat the same failure." };
+        // Adaptive: an unchanged repair is evidence the agent lacks information → investigate once (bounded); otherwise stop.
+        if (adaptiveOn) {
+          await applyDecision(adjust({ attempt, maxAttempts: b.maxRepairs + 1, adjustmentsSoFar: adjustments, recurringDefect: false, identicalTree: true, revertedFiles: [], scopeGrowth: 1, unprovenCriteria: 0, reviewerConflict: false, categories: [], budgetLeftUsd: await remainingFor(b) }), attempt);
+          if (!stopped) continue;
+        } else stopped = { reason: "repeated_failure", detail: "The repair attempt left the code exactly as it was after the previous failed attempt; retrying again would repeat the same failure." };
         break;
       }
       lastTree = th;
@@ -598,34 +618,16 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       // Feedback controller (adaptive policies only): a bounded, evidence-driven strategy change — or stop.
       if (adaptiveOn) {
         const nowChanged = changed.map((c) => c.path);
-        // Evidence of thrashing: files changed last attempt now back to their base content; or the exact same diff again.
+        // Evidence of thrashing: files changed last attempt now back to their base content (identical trees are handled above).
         const reverted = prevChanged.filter((p) => afterFiles[p] === baseFiles[p]);
-        const sig = nowChanged.slice().sort().map((p) => `${p}\0${afterFiles[p] ?? ""}`).join("\0");
-        const identicalTree = !!prevSig && sig === prevSig;
         prevChanged = nowChanged;
-        prevSig = sig;
-        const decision = adjust({
+        await applyDecision(adjust({
           attempt, maxAttempts: b.maxRepairs + 1, adjustmentsSoFar: adjustments,
-          recurringDefect: !!att.recurring, identicalTree, revertedFiles: reverted,
+          recurringDefect: !!att.recurring, identicalTree: false, revertedFiles: reverted,
           scopeGrowth: scope.length ? nowChanged.filter((p) => !isTestFile(p)).length / scope.length : 1,
           unprovenCriteria: unmet.length, reviewerConflict: !!rv.decision?.disagreement,
           categories: att.open.map((d) => d.category), budgetLeftUsd: await remainingFor(b),
-        });
-        let applied = "none";
-        if (decision.action === "stop") {
-          applied = "stopped the run";
-          stopped = { reason: "strategy_exhausted", detail: `${decision.blocker}: ${decision.rationale}` };
-        } else if (decision.action === "escalate_model") { escalate = true; applied = "next attempt on the REASONING tier"; }
-        else if (decision.action === "investigate") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. Before editing, read the failing tests and the code they exercise and state the root cause.`; applied = "investigation step before the next edit"; }
-        else if (decision.action === "add_reproduction") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. First write a minimal test that reproduces the remaining failure and show it failing; then fix the code.`; applied = "reproduce-first repair"; }
-        else if (decision.action === "narrow_scope") { adjustNote = `Strategy change (feedback controller): ${decision.rationale}. Only change: ${scope.join(", ") || "the files named by the failing tests"} and their tests; revert unrelated edits.`; applied = "narrowed scope"; }
-        else if (decision.action === "add_reviewer") { applied = "independent reviewer verdicts decide (evidence over opinion)"; }
-        else adjustNote = "";
-        if (decision.action !== "continue") {
-          adjustments.push(decision.action);
-          await recordAdjustment(b.id, attempt, decision, applied);
-          await event(b, `Strategy change for ${b.itemKey}: ${decision.action.replace(/_/g, " ")} — ${decision.rationale}`, decision.action === "stop" ? "danger" : "warning", owner);
-        }
+        }), attempt);
         if (stopped) break;
       }
     }
