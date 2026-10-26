@@ -229,6 +229,27 @@ export async function settleExperience(companyId: string, productId: string) {
   }
 }
 
+const BROWSER_TO_RULES: Record<string, string[]> = {
+  overflow: ["responsive:overflow"],
+  unlabeled_control: ["a11y:unlabeled_field", "axe:label", "axe:button-name", "axe:link-name", "axe:select-name", "axe:input-button-name"],
+  page_error: ["page:error"],
+  console_error: ["page:console_error"],
+  request_failed: ["page:request_failed"],
+  load_failed: ["page:load_failed"],
+};
+
+/**
+ * Build browser findings that an experience audit ALREADY observed on the
+ * product's base (open finding, same rule family, route and viewport) were
+ * not introduced by this change. They stay visible, labelled pre-existing,
+ * but do not block a targeted fix — they are tracked as their own findings.
+ * Journey failures are never matched (the task's own journeys must pass).
+ */
+export async function preexistingExperience(companyId: string, productId: string, fs: { kind: string; route: string; viewport: string }[]) {
+  const open = await prisma.experienceFinding.findMany({ where: { companyId, productId, status: { in: ["OPEN", "REOPENED"] } }, select: { id: true, rule: true, route: true, viewport: true } });
+  return fs.map((f) => open.find((o) => (BROWSER_TO_RULES[f.kind] ?? []).includes(o.rule) && o.route === f.route && (!o.viewport || o.viewport.split(",").includes(f.viewport)))?.id ?? null);
+}
+
 export async function setFindingStatus(companyId: string, productId: string, findingId: string, actor: string, status: "ACCEPTED_RISK" | "DISMISSED" | "OPEN", note: string) {
   const f = await prisma.experienceFinding.findFirst({ where: { id: findingId, companyId, productId } });
   if (!f) throw new ApiError("Finding not found", 404);

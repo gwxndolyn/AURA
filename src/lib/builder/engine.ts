@@ -51,6 +51,7 @@ import { learningContext, recordRecipeUse } from "@/lib/learning/retrieval";
 import { snapshotGraph, selectTests, investigate, settleInvestigations, diagnosisText } from "./integration";
 import { emit as emitLearning } from "@/lib/learning/service";
 import { assessRisk, reviewPlan, handoffFor, recoveryFor, resolveDisagreement, contextPackage, type ReviewPlan, type ReviewOutcome } from "./orchestrator";
+import { preexistingExperience } from "@/lib/experience/service";
 import { planExecution, recordAdjustment, recordVerification, strategyObjective, type ExecutionPlanRecord } from "./planner";
 import { adjust, executedChecks, verificationStatus, ADAPTIVE_POLICIES, type Adjustment, type AdjustDecision } from "./adaptive";
 
@@ -495,7 +496,8 @@ async function runBuildInner(buildId: string, jobId: string | null) {
       const th = await treeHash(tree);
       if (lastTree && th === lastTree) {
         // Adaptive: an unchanged repair is evidence the agent lacks information → investigate once (bounded); otherwise stop.
-        if (adaptiveOn) {
+        // On the last allowed attempt there is no next attempt to investigate in: it is a repeated failure.
+        if (adaptiveOn && attempt < b.maxRepairs) {
           await applyDecision(adjust({ attempt, maxAttempts: b.maxRepairs + 1, adjustmentsSoFar: adjustments, recurringDefect: false, identicalTree: true, revertedFiles: [], scopeGrowth: 1, unprovenCriteria: 0, reviewerConflict: false, categories: [], budgetLeftUsd: await remainingFor(b) }), attempt);
           if (!stopped) continue;
         } else stopped = { reason: "repeated_failure", detail: "The repair attempt left the code exactly as it was after the previous failed attempt; retrying again would repeat the same failure." };
@@ -537,7 +539,13 @@ async function runBuildInner(buildId: string, jobId: string | null) {
         await update(b, { browser: JSON.stringify({ ...browserRes, attempt }) });
         if (browserRes.status === "unavailable") ver.notes.push(`Browser verification not run: ${browserRes.reason}`);
       }
-      const browserFindings: Finding[] = (browserRes?.findings ?? []).map((f) => ({ source: "browser", severity: f.severity, title: `browser ${f.kind.replace(/_/g, " ")} (${f.route} @ ${f.viewport})`, detail: f.detail, evidence: `real Chromium run of build ${b.id.slice(-6)} attempt ${attempt}`, blocking: f.blocking }));
+      // Browser problems an experience audit already recorded on the base (open finding, same rule/route/viewport) were not
+      // introduced by this change: reported as pre-existing (tracked on their own finding), not blocking this task.
+      const known = browserRes ? await preexistingExperience(b.companyId, product.id, browserRes.findings.filter((f) => f.kind !== "journey_failed")) : [];
+      const browserFindings: Finding[] = (browserRes?.findings ?? []).map((f) => {
+        const pre = f.kind === "journey_failed" ? null : known[browserRes!.findings.filter((x) => x.kind !== "journey_failed").indexOf(f)];
+        return { source: "browser", severity: f.severity, title: `browser ${f.kind.replace(/_/g, " ")} (${f.route} @ ${f.viewport})${pre ? " — pre-existing" : ""}`, detail: pre ? `${f.detail} (already recorded as experience finding ${pre.slice(-6)} before this change)` : f.detail, evidence: `real Chromium run of build ${b.id.slice(-6)} attempt ${attempt}`, blocking: f.blocking && !pre };
+      });
       const browserEvidence = browserRes && browserRes.status !== "unavailable" ? `\n\n# Browser verification (real Chromium; observations)\nStatus: ${browserRes.status}\n${browserRes.routes.map((r) => `- ${r.route} @ ${r.viewport}: HTTP ${r.httpStatus}`).join("\n")}\n${browserRes.journeys.map((j) => `- journey "${j.name}": ${j.status} — ${j.detail}`).join("\n")}\n${browserRes.findings.map((f) => `- [${f.kind}] ${f.route} @ ${f.viewport}: ${f.detail}`).join("\n") || "- no findings"}` : browserRes ? `\n\n# Browser verification\nNOT RUN: ${browserRes.reason}. Browser-visible criteria cannot be 'met' from browser evidence.` : "";
       ver.browserEvidence = browserEvidence;
       const rv = ver.passed && !confirmed.length

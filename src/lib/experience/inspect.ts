@@ -93,6 +93,8 @@ function pageAudit() {
   const overflow = d.scrollWidth - window.innerWidth;
   const interactive = [...document.querySelectorAll("a[href], button, input:not([type=hidden]), select, textarea, [role=button], [onclick]")].filter(visible);
   const small = interactive.filter((el) => { const r = el.getBoundingClientRect(); return (r.width < 24 || r.height < 24) && !(el as HTMLInputElement).type?.match?.(/checkbox|radio/) && !el.closest("p, li") ; }).map(sel).slice(0, 6);
+  // A placeholder is not a label (it disappears while typing; WCAG 3.3.2): fields need a <label>, aria-label or aria-labelledby.
+  const unlabeled = [...document.querySelectorAll("input:not([type=hidden]):not([type=submit]):not([type=button]), select, textarea")].filter(visible).filter((el) => { const id = el.getAttribute("id"); return !(el.getAttribute("aria-label") || el.getAttribute("aria-labelledby") || (id && document.querySelector(`label[for="${id}"]`)) || el.closest("label")); }).map(sel).slice(0, 6);
   const unreachable = [...document.querySelectorAll("[onclick], [role=button], div[data-action], span[data-action]")].filter(visible).filter((el) => !["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(el.tagName) && (el as HTMLElement).tabIndex < 0).map(sel).slice(0, 6);
   const clipped = [...document.querySelectorAll("h1,h2,h3,p,li,label,button,a,td,th,span")].filter(visible).filter((el) => { const h = el as HTMLElement; const s = getComputedStyle(h); return (s.overflow === "hidden" || s.textOverflow === "ellipsis" || s.overflowX === "hidden") && h.scrollWidth > h.clientWidth + 2 && (h.innerText || "").trim().length > 0; }).map(sel).slice(0, 6);
   const headings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].filter(visible).map((h) => Number(h.tagName[1]));
@@ -104,7 +106,7 @@ function pageAudit() {
   const buttons = [...document.querySelectorAll("button")].filter(visible).filter((b) => !b.closest("form") && b.type !== "submit" && !(b as HTMLButtonElement).disabled).map((b, i) => ({ i, label: sel(b) }));
   const links = [...document.querySelectorAll("a[href]")].map((a) => (a as HTMLAnchorElement).href).filter((h) => h.startsWith(location.origin) && !h.includes("#")).slice(0, 25);
   const primary = interactive.some((el) => { const r = el.getBoundingClientRect(); return r.top < window.innerHeight && (el.tagName === "BUTTON" || el.getAttribute("type") === "submit" || el.getAttribute("role") === "button" || el.tagName === "A"); });
-  return { overflow, small, unreachable, clipped, h1, skip, loaders, forms, buttons, links, primary };
+  return { overflow, small, unreachable, unlabeled, clipped, h1, skip, loaders, forms, buttons, links, primary };
 }
 
 async function focusVisible(page: Page) {
@@ -138,7 +140,8 @@ export async function browserInspect(args: {
   const axe = await axeScript().catch((e) => { axeState = `unavailable: axe-core not installed (${(e as Error).message.slice(0, 80)})`; return null; });
   const forms = { total: 0, withValidationFeedback: 0, withRecovery: 0 };
   const seenLinks = new Set<string>();
-  let firstButtons: { route: string; buttons: { i: number; label: string }[] }[] = [];
+  const firstButtons: { route: string; buttons: { i: number; label: string }[] }[] = [];
+  const widest = [...args.viewports].sort((x, y) => y.width - x.width)[0];
 
   for (const vp of args.viewports) {
     const ctx = await args.browser.newContext({ viewport: { width: vp.width, height: vp.height }, reducedMotion: "reduce" });
@@ -165,8 +168,9 @@ export async function browserInspect(args: {
         if (a.overflow > 4) obs.push({ rule: "responsive:overflow", method: "browser", route, viewport: vp.name, detail: `document is ${a.overflow}px wider than the ${vp.width}px viewport`, evidence: [{ kind: "layout", ref: `${route}@${vp.name}`, detail: `scrollWidth − innerWidth = ${a.overflow}px` }] });
         if (a.small.length && vp.width < 800) obs.push({ rule: "responsive:small_target", method: "browser", route, viewport: vp.name, target: a.small[0], detail: `targets smaller than 24×24 px: ${a.small.join(", ")}`, evidence: [{ kind: "layout", ref: `${route}@${vp.name}`, detail: a.small.join(", ") }] });
         if (a.clipped.length) obs.push({ rule: "responsive:clipped_text", method: "browser", route, viewport: vp.name, target: a.clipped[0], detail: `clipped text: ${a.clipped.join(", ")}`, evidence: [{ kind: "layout", ref: `${route}@${vp.name}`, detail: a.clipped.join(", ") }] });
+        if (a.unlabeled.length) obs.push({ rule: "a11y:unlabeled_field", method: "browser", route, viewport: vp.name, target: a.unlabeled[0], detail: `form fields without a label (a placeholder is not a label): ${a.unlabeled.join(", ")}`, files: [fileFor(route)], evidence: [{ kind: "dom", ref: route, detail: a.unlabeled.join(", ") }] });
         for (const u of a.unreachable) obs.push({ rule: "a11y:keyboard_unreachable", method: "browser", route, viewport: vp.name, target: u, detail: `${u} has a click handler but is not focusable`, files: [fileFor(route)], evidence: [{ kind: "dom", ref: route, detail: `${u}: tabIndex < 0, not a native control` }] });
-        if (vp === args.viewports[args.viewports.length - 1]) {
+        if (vp === widest) {
           if (a.h1 !== 1 || a.skip) obs.push({ rule: "a11y:heading_order", method: "browser", route, viewport: vp.name, detail: a.h1 !== 1 ? `${a.h1} h1 element(s) on the page` : `heading level skipped: ${a.skip}`, files: [fileFor(route)], evidence: [{ kind: "dom", ref: route, detail: a.h1 !== 1 ? `h1 count ${a.h1}` : a.skip }] });
           if (!a.primary && route === "/") obs.push({ rule: "clarity:no_primary_action", method: "browser", route, viewport: vp.name, detail: "no button or link is visible in the first viewport", evidence: [{ kind: "layout", ref: route, detail: "no interactive element above the fold" }] });
           if (a.loaders.length) { await page.waitForTimeout(4000); const still = await page.evaluate(pageAudit).catch(() => null); if (still?.loaders.length) obs.push({ rule: "state:loading_stuck", method: "browser", route, viewport: vp.name, target: still.loaders[0], detail: `loading indicator still visible after 4 s: ${still.loaders.join(", ")}`, evidence: [{ kind: "dom", ref: route, detail: still.loaders.join(", ") }] }); }
@@ -200,7 +204,7 @@ export async function browserInspect(args: {
     await ctx.close();
   }
 
-  const desktop = args.viewports[args.viewports.length - 1];
+  const desktop = widest;
   const ctx = await args.browser.newContext({ viewport: { width: desktop.width, height: desktop.height } });
   try {
     // Inert controls: click each visible non-form button in a fresh page, watch for any effect.

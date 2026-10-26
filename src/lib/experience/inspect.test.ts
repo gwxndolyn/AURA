@@ -52,7 +52,8 @@ describe("experience inspection (real Docker + Chromium + axe-core)", () => {
     const { r, findings, rules } = await inspect(appFiles(false));
     for (const rule of ["form:no_validation_feedback", "form:error_not_recoverable", "control:inert", "responsive:overflow", "nav:broken_link", "a11y:reduced_motion_ignored", "journey:failed"]) expect(rules, rule).toContain(rule);
     expect([...rules].some((x) => x.startsWith("axe:"))).toBe(true); // unlabeled input / contrast found by axe-core
-    expect(rules.has("axe:label") || rules.has("axe:color-contrast")).toBe(true);
+    expect(rules.has("axe:color-contrast")).toBe(true);
+    expect(rules).toContain("a11y:unlabeled_field"); // placeholder-only input
     const create = r.journeys.find((j) => j.id === "create:/api/notes")!;
     expect(create.status).toBe("failed");
     expect(create.detail).toMatch(/did not show it until a reload/);
@@ -76,7 +77,7 @@ describe("experience inspection (real Docker + Chromium + axe-core)", () => {
   it("the corrected app no longer shows those defects; the journeys pass with step evidence", async (c) => {
     if (!ok) return c.skip();
     const { r, rules } = await inspect(appFiles(true));
-    for (const rule of ["form:no_validation_feedback", "form:error_not_recoverable", "control:inert", "responsive:overflow", "nav:broken_link", "a11y:reduced_motion_ignored", "journey:failed", "axe:label", "axe:color-contrast"]) expect(rules, rule).not.toContain(rule);
+    for (const rule of ["form:no_validation_feedback", "form:error_not_recoverable", "control:inert", "responsive:overflow", "nav:broken_link", "a11y:reduced_motion_ignored", "journey:failed", "a11y:unlabeled_field", "axe:color-contrast"]) expect(rules, rule).not.toContain(rule);
     const create = r.journeys.find((j) => j.id === "create:/api/notes")!;
     expect(create.status).toBe("passed");
     expect(create.steps.map((s) => s.ok)).toEqual([true, true, true, true]);
